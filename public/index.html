@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0d171d">
+  <title>Live Podcast Studio</title>
+  <link rel="stylesheet" href="/public/style.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark"><span></span><span></span><span></span><span></span></div><div><strong>VOICE / VOICE</strong><small>LIVE PODCAST STUDIO</small></div></div>
+      <nav><button data-view="dashboard" class="nav active"><span>◫</span> Overview</button><button data-view="personas" class="nav"><span>◉</span> Personas</button><button data-view="episodes" class="nav"><span>▦</span> Episodes</button></nav>
+      <div class="sidebar-bottom"><div class="connection"><span class="status-dot" id="modelDot"></span><span id="modelState">Checking model…</span></div><div class="connection"><span class="status-dot" id="sandboxDot"></span><span id="sandboxState">Checking sandbox…</span></div><div class="sidebar-note">One take. Two minds.<br>Everything happens live.</div></div>
+    </aside>
+    <main>
+      <header class="topbar"><div class="crumb">STUDIO <span>/</span> <span id="crumb">OVERVIEW</span></div><div class="top-actions"><span id="clock"></span><button class="button button-primary small" id="newEpisodeTop">+ New episode</button></div></header>
+      <div id="notice" class="notice hidden"></div>
+      <section class="view" id="view-dashboard">
+        <div class="hero"><div><div class="eyebrow">THE STUDIO IS OPEN</div><h1>A conversation<br><em>worth watching.</em></h1><p>Build two distinct minds, give the host a direction, and let the conversation find its own way.</p><div class="hero-buttons"><button class="button button-primary" id="newEpisodeHero">Create an episode <span>↗</span></button><button class="button button-ghost" id="newPersonaHero">Build a persona</button></div></div><div class="hero-art"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="hero-disc host-disc">H</div><div class="hero-disc guest-disc">G</div><div class="hero-wave">▂ ▅ ▃ ▇ ▄ ▆ ▂ ▅ ▇ ▃ ▆ ▄ ▂ ▆ ▃ ▇ ▄</div></div></div>
+        <div class="section-heading"><div><div class="eyebrow">YOUR WORKSPACE</div><h2>Recent episodes</h2></div><button class="link-button" data-view="episodes">View all episodes →</button></div>
+        <div id="recentEpisodes" class="cards"></div>
+        <div class="section-heading"><div><div class="eyebrow">THE CAST</div><h2>Your personas</h2></div><button class="link-button" data-view="personas">Manage personas →</button></div>
+        <div id="recentPersonas" class="persona-strip"></div>
+      </section>
+      <section class="view hidden" id="view-personas"><div class="page-heading"><div><div class="eyebrow">CHARACTERS WITH DEPTH</div><h1>Personas</h1><p>Private instructions, real knowledge, and a voice of their own.</p></div><button class="button button-primary" id="newPersonaButton">+ New persona</button></div><div id="personaGrid" class="persona-grid"></div></section>
+      <section class="view hidden" id="view-episodes"><div class="page-heading"><div><div class="eyebrow">THE ARCHIVE</div><h1>Episodes</h1><p>Every take, transcript, tool action, and finished video in one place.</p></div><button class="button button-primary" id="newEpisodeButton">+ New episode</button></div><div id="episodeList" class="episode-list"></div></section>
+      <section class="view hidden" id="view-studio"><div class="studio-heading"><div><button class="back" id="backToEpisodes">← Episodes</button><div class="eyebrow">LIVE PRODUCTION</div><h1 id="studioTitle">Episode</h1><div id="studioMeta" class="studio-meta"></div></div><div class="studio-controls"><span id="liveStatus" class="pill">DRAFT</span><button class="button button-danger hidden" id="stopEpisode">Stop episode</button><button class="button button-primary" id="startEpisode">Start recording</button></div></div><div class="studio-layout"><div><div class="stage-shell"><canvas id="stage" width="1280" height="720"></canvas><div class="stage-footer"><span><span class="record-dot"></span> SINGLE TAKE</span><span id="stageTimer">00:00</span><button id="fullscreenStage" title="Fullscreen">⤢</button></div></div><div class="studio-downloads" id="downloads"></div><video id="reviewPlayer" class="review-player hidden" controls preload="metadata" playsinline></video></div><div class="studio-side"><div class="side-tabs"><button class="side-tab active" data-side="transcript">Transcript</button><button class="side-tab" data-side="activity">Sandbox log</button></div><div id="transcriptPane" class="side-content"></div><div id="activityPane" class="side-content hidden"></div></div></div></section>
+    </main>
+  </div>
+
+  <dialog id="personaDialog" class="dialog"><form id="personaForm" method="dialog"><div class="dialog-head"><div><div class="eyebrow">PERSONA BUILDER</div><h2 id="personaDialogTitle">New persona</h2></div><button type="button" class="icon-button close-dialog">×</button></div><div class="dialog-scroll"><label>Name<input name="name" required maxlength="80" placeholder="e.g. Dr. Maya Rao"></label><label>System prompt<textarea name="systemPrompt" required rows="6" placeholder="Who are they? How do they speak? What do they know? How do they behave on air?"></textarea></label><div class="form-row"><label>Model provider<select name="modelProvider" id="modelProvider"></select></label><label>Model<input name="model" placeholder="Default model"></label></div><div class="form-row"><label>Speech provider<select name="speechProvider" id="speechProvider"></select></label><label>Voice<input name="voice" id="voiceSelect" list="voiceSuggestions" placeholder="Provider voice ID"><datalist id="voiceSuggestions"></datalist></label></div><div class="form-row"><label>Display image<input type="file" name="imageFile" accept="image/png,image/jpeg,image/webp"></label><div id="imagePreview" class="image-preview">No image selected</div></div><label>Knowledge files <span class="hint">TXT, MD, CSV, JSON, PDF or DOCX</span><input type="file" name="knowledgeFiles" multiple accept=".txt,.md,.csv,.json,.pdf,.docx"></label><div id="knowledgeList" class="knowledge-list"></div></div><div class="dialog-actions"><button type="button" class="button button-ghost close-dialog">Cancel</button><button type="submit" class="button button-primary">Save persona</button></div></form></dialog>
+
+  <dialog id="episodeDialog" class="dialog"><form id="episodeForm" method="dialog">
+    <div class="dialog-head"><div><div class="eyebrow">PRODUCTION SETUP</div><h2>Create an episode</h2></div><button type="button" class="icon-button close-dialog">×</button></div>
+    <div class="dialog-scroll">
+      <div class="form-row"><label>Host<select name="hostId" required id="hostSelect"></select></label><label>Guest<select name="guestId" required id="guestSelect"></select></label></div>
+      <label>Subject<input name="subject" required maxlength="200" placeholder="What is this conversation about?"></label>
+      <label>Host's rough angle<textarea name="angle" rows="2" placeholder="The host's private direction for the episode"></textarea></label>
+      <label>Host's discussion points<textarea name="points" rows="3" placeholder="A few ideas to explore, not a script"></textarea></label>
+      <div class="form-row"><label>Layout<select name="layout"><option value="balanced">Balanced</option><option value="stage">Stage + sandbox</option></select></label><label>Safety duration limit<select name="maxMinutes"><option value="10">10 minutes</option><option value="30" selected>30 minutes</option><option value="60">60 minutes</option><option value="120">120 minutes</option></select></label></div>
+      <div class="form-row"><label>Resolution<select name="resolution"><option value="1280x720">720p</option><option value="1920x1080">1080p</option></select></label><label>Output format<select name="outputFormat"><option value="both">MP4 + WebM</option><option value="mp4">MP4</option><option value="webm">WebM</option></select></label></div>
+      <div class="form-row"><label>Host accent<input name="accent" type="color" value="#80ded1"></label><label>Guest accent<input name="guestAccent" type="color" value="#efbe9e"></label></div>
+      <div class="form-row"><label>Background color<input name="background" type="color" value="#101c24"></label><label>Glow strength<select name="glowStrength"><option value="0.5">Soft</option><option value="1" selected>Standard</option><option value="1.8">Strong</option></select></label></div>
+      <label>Sandbox pane width <span class="hint">55–72% of stage</span><input name="paneWidth" type="range" min="55" max="72" value="66"><span id="paneValue" class="hint">66%</span></label>
+      <div class="checks"><label><input name="interjections" type="checkbox" checked> Allow interjections</label><label><input name="hostTools" type="checkbox"> Allow host tools</label></div>
+      <label>Spontaneous interjection chance <span class="hint">0–25% per speech pause</span><input name="interjectProbability" type="range" min="0" max="25" value="3"><span id="interjectValue" class="hint">3%</span></label>
+    </div>
+    <div class="dialog-actions"><button type="button" class="button button-ghost close-dialog">Cancel</button><button type="submit" class="button button-primary">Create episode</button></div>
+  </form></dialog>
+  <script type="module" src="/public/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "live-podcast-studio",
+  "version": "0.0.0-1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "e2b": "^2.51.0",
+    "mammoth": "^1.12.3",
+    "pdfjs-dist": "^6.3.289"
+  }
+}
