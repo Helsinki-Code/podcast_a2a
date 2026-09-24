@@ -1,46 +1,82 @@
-# Live Podcast Studio
+# The Sales Forge
 
-An AI-to-AI podcast production workspace built from the [full build spec](./AI%20Podcast%20Platform%20%E2%80%94%20Full%20Build%20Spec%20%28v0.0.0.1%29.md). Create reusable host and guest personas, attach private knowledge files, set a host-only topic outline, and record an unscripted conversation with live sandbox demonstrations.
+The Sales Forge is a paid AI product media studio at [dsalesforge.online](https://dsalesforge.online). It produces two kinds of downloadable video:
 
-## Start
+- AI-to-AI podcasts with distinct host and guest personas, private knowledge, live speech, captions, and real Agent Browser demonstrations.
+- 1080p platform explainers where an isolated browser signs into an application, follows the requested workflow, records the screen, narrates the product, burns subtitles into the MP4, and provides a caption file.
 
-Requires Node.js 22 or newer and `ffmpeg` for MP4 export.
+There is no free workspace. Clerk authenticates users, Stripe Billing controls access, and every successful invoice grants the plan’s monthly credits.
+
+## Plans and credit costs
+
+| Plan | Monthly price | Monthly credits |
+| --- | ---: | ---: |
+| Starter | $99 | 100 |
+| Pro | $249 | 300 |
+| Scale | $599 | 1,000 |
+
+A podcast costs 20 credits. A platform explainer costs 30 credits. Credit reservations are idempotent, and a workflow failure refunds its reservation once.
+
+## Production architecture
+
+- Clerk provides production authentication and account management.
+- Stripe Checkout creates subscriptions. Signed Stripe webhooks update subscription state and grant credits after paid invoices. Stripe’s customer portal handles payment methods, invoices, and cancellation.
+- Vercel Workflow runs podcast and explainer jobs as durable steps.
+- Vercel AI Gateway runs planning and speech generation.
+- Vercel Sandbox and Agent Browser operate websites in persistent, isolated sessions.
+- The explainer snapshot contains Agent Browser, Chrome, ffmpeg 7, and ffprobe.
+- Neon stores owner-scoped personas, episodes, explainers, accounts, credit ledger entries, and processed webhook IDs.
+- Private Vercel Blob stores speech, captures, subtitles, and finished videos.
+
+Credentials entered for an authenticated demonstration go directly to the isolated browser login flow. Passwords are not stored in Neon and are not sent to the model. Users must only provide credentials for applications they are authorized to access.
+
+## Required environment variables
+
+```dotenv
+NEXT_PUBLIC_APP_URL=https://dsalesforge.online
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=
+CLERK_SECRET_KEY=
+STRIPE_SECRET_KEY=
+NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=
+STRIPE_WEBHOOK_SECRET=
+STRIPE_PRICE_STARTER=
+STRIPE_PRICE_PRO=
+STRIPE_PRICE_SCALE=
+STRIPE_PORTAL_CONFIGURATION=
+DATABASE_URL=
+BLOB_READ_WRITE_TOKEN=
+AGENT_BROWSER_SNAPSHOT_ID=
+```
+
+Vercel supplies OIDC for AI Gateway and Sandbox in deployed environments. Local development can use `AI_GATEWAY_API_KEY`; direct OpenAI speech can use `OPENAI_API_KEY`.
+
+## Local development
+
+Requires Node.js 22 or newer.
 
 ```bash
 npm install
-cp .env.example .env
+vercel link
+vercel env pull .env.local
+npm run dev
 ```
 
-Set `OPENAI_API_KEY` in `.env`. Set `E2B_API_KEY` to enable isolated code, browser, and file tools. An E2B custom template with Python, Node.js, Playwright, Chromium, and curl installed will make browser starts much faster; set its ID as `E2B_TEMPLATE`. Without a template, the browser tool installs Playwright and Chromium in that episode's sandbox on first use.
+The standalone server uses port 3377:
 
 ```bash
-npm start
+npm run build
+PORT=3377 node server.mjs
 ```
 
-Open [http://127.0.0.1:3377](http://127.0.0.1:3377). The server binds to localhost by default. Data is stored in `data/` and is ignored by Git.
+## Verification
 
-## Production flow
+```bash
+npm test
+npm run build
+node scripts/check-stripe-checkout.mjs
+node scripts/check-explainer-render.mjs
+```
 
-1. Create at least two personas. Each gets its own prompt, text/PDF/DOCX knowledge files, model provider, speech provider and voice, and an optional display image. The retrieval layer indexes each file in chunks and selects relevant passages on every turn.
-2. Create an episode, choosing the host, guest, private host outline, optional host tool access, interjection setting, visual layout, colors, glow, pane width, resolution, output format, and a duration safety limit. The episode keeps a snapshot of both personas as they were at creation time.
-3. In the episode studio, click **Start recording**. Keep the studio tab open for the full take. Browser playback acknowledges each spoken segment before the next segment begins, so the recorded timing matches what plays.
-4. Review the take in the studio or download the transcript, episode data, WebM master, or MP4 export when the episode completes. MP4 requires `ffmpeg`; WebM remains available if conversion fails.
+`scripts/saas-e2e.mjs` creates a disposable Clerk development user and Stripe test checkout, verifies the unpaid lock, signed webhooks, credits, owner isolation, podcasts, and explainers, then deletes its records.
 
-The host receives the private outline. The guest receives only the subject, transcript, its own prompt and retrieved knowledge, and the currently visible sandbox state. Neither receives the other's prompt or files. The host decides when to close naturally; the duration setting is a safety limit rather than a fixed turn count.
-
-Speech is synthesized in short utterances and its MP3 chunks are sent to playback as they arrive. The browser connects playback to a Web Audio analyser and the canvas recorder, so the speaking glow uses live audio amplitude. The video recorder captures the stage continuously from start to finish. Browser and terminal outputs are stored as events with timestamps alongside each episode.
-
-## Sandbox tools
-
-Code runs Python or JavaScript in an episode-scoped E2B microVM. Browser actions use a persistent Playwright page inside that same microVM and return screenshots. Diagram actions render SVG; file actions create text, data, or SVG artifacts in the isolated filesystem and store copies for review. Agents can also play an MP3, WAV, or OGG file created inside the microVM; that sound is mixed into the continuous recording. The microVM is killed at episode end. No AI-generated code runs on the studio host.
-
-Each action emits start, partial output where available, and completion events. The other persona may fill longer tool waits with a live reaction. New tool types and providers can be registered through [`plugins/README.md`](./plugins/README.md).
-
-## Operational limits
-
-- A browser tab must stay open during recording; a disconnected playback client ends the run after a timeout.
-- The service is designed for a trusted local operator. It has no user accounts or public deployment security layer.
-- API keys for live OpenAI/E2B integration are not bundled. The automated test suite covers orchestration and retrieval with local provider doubles. A real provider run needs your own keys.
-- Images are limited to 3 MB; knowledge uploads to 5 MB each; each extracted document is capped at 250,000 characters.
-
-Run tests with `npm test`.
+The original feature specification remains in [AI Podcast Platform — Full Build Spec (v0.0.0.1).md](./AI%20Podcast%20Platform%20%E2%80%94%20Full%20Build%20Spec%20%28v0.0.0.1%29.md).

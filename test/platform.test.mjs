@@ -13,12 +13,38 @@ const providers = await import('../lib/providers.mjs');
 const { runEpisode } = await import('../lib/engine.mjs');
 const { retrieve, buildIndex } = await import('../lib/rag.mjs');
 const { startSpeech, openLiveAudio } = await import('../lib/audio.mjs');
+const { ownContext } = await import('../lib/conversation.mjs');
 await store.initStore();
 
 test('retrieval returns only relevant source chunks', () => {
   const files = [{ name: 'solar.txt', text: 'Photovoltaic panels turn sunlight into electricity. Solar cells are installed on roofs.' }, { name: 'baking.txt', text: 'Bread needs flour and water.' }];
   const index = buildIndex(files);
   assert.equal(retrieve(index, 'How do solar panels work?')[0].source, 'solar.txt');
+});
+
+test('guest context requires a real browser demo without exposing login secrets', () => {
+  const episode = { outline: { subject: 'Platform overview', angle: 'private', points: '' }, turns: [], events: [], settings: { hostTools: false, requireGuestDemo: true, demo: { url: 'https://example.com/app', brief: 'Show the dashboard.', authRequired: true } } };
+  const messages = ownContext(episode, 'guest', { systemPrompt: 'Explain clearly.', knowledge: [] }, { type: 'browser', title: 'Dashboard', content: 'Overview' }, 'turn');
+  const text = JSON.stringify(messages);
+  assert.match(text, /requires a real live computer demonstration/);
+  assert.match(text, /https:\/\/example\.com\/app/);
+  assert.doesNotMatch(text, /hunter2|secret@example\.com/i);
+});
+
+test('paid credits are granted once, debited once per job, and isolated by owner', async () => {
+  const userId = 'user_test_credit_owner';
+  await store.account(userId, 'owner@example.com');
+  await store.updateSubscription(userId, { plan: 'starter', subscriptionStatus: 'active', stripeSubscriptionId: 'sub_test', stripePriceId: 'price_test' });
+  assert.equal(await store.grantCredits(userId, 100, 'subscription_cycle', 'in_test', 'invoice:in_test'), true);
+  assert.equal(await store.grantCredits(userId, 100, 'subscription_cycle', 'in_test', 'invoice:in_test'), false);
+  assert.equal(await store.reserveCredits(userId, 20, 'podcast', 'episode_test'), true);
+  assert.equal(await store.reserveCredits(userId, 20, 'podcast', 'episode_test'), true);
+  assert.equal((await store.account(userId)).credits, 80);
+  await store.addPersona({ id: store.uid(), ownerId: userId, name: 'Owned', systemPrompt: 'Test', image: '/assets/owned.png' });
+  await store.addPersona({ id: store.uid(), ownerId: 'another_user', name: 'Hidden', systemPrompt: 'Test' });
+  assert.deepEqual((await store.listPersonas(userId)).map(item => item.name), ['Owned']);
+  assert.equal(await store.assetOwnedBy(userId, 'owned.png'), true);
+  assert.equal(await store.assetOwnedBy('another_user', 'owned.png'), false);
 });
 
 test('speech chunks reach playback before the archive is complete', async () => {

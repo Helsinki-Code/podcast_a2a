@@ -1,14 +1,13 @@
-# Provider and tool plugins
+# Provider plugins
 
-The server imports every `*.mjs` file in this directory at startup. A plugin can register a model, speech provider, or sandbox tool without changing the orchestrator or studio renderer.
+Add a provider module in this directory and import it explicitly from `index.mjs`. Static imports let Next include the module in the Vercel function bundle.
 
 ```js
 import { registerModel, registerSpeech } from '../lib/providers.mjs';
-import { registerTool } from '../lib/sandbox.mjs';
 
 registerModel('your-model', {
+  ready: () => true,
   async generate(messages, model) {
-    // Return the same JSON structure requested in the system message.
     return { segments: [{ type: 'speak', text: '...' }], finish: false };
   }
 });
@@ -16,17 +15,9 @@ registerModel('your-model', {
 registerSpeech('your-tts', {
   voices: ['voice-id'],
   async synthesize(text, voice) {
-    // Return MP3 bytes as a Buffer or an async iterable of chunks.
-    // Streaming chunks start playback before synthesis is finished.
-    return providerResponse.body;
+    return mp3Bytes;
   }
-});
-
-registerTool('your-tool', async (episodeSandbox, input) => {
-  // Use episodeSandbox.ensure() for work in its isolated E2B microVM.
-  // Return a screen object; the studio renders its title, content and image.
-  return { type: 'file', title: 'Result', content: 'Visible output' };
 });
 ```
 
-Place secrets in `.env`, never in persona prompts or browser code. Restart the server after adding a plugin.
+Provider secrets belong in Vercel environment variables. Restart local development after adding an import.

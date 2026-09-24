@@ -2,3 +2,11 @@ node_modules/
 data/
 .env
 *.log
+/.swc
+/.next
+/public/blob-upload.bundle.js
+/public/clerk.bundle.js
+.vercel
+.env*
+/.agents/
+/scripts/podcast-e2e.mjs

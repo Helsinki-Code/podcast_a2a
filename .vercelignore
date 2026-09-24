@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+.next
+data
+node_modules
+*.log
+.agents
+scripts/podcast-e2e.mjs
