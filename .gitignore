@@ -6,6 +6,7 @@ data/
 /.next
 /public/blob-upload.bundle.js
 /public/clerk.bundle.js
+/public/clerk-runtime/
 .vercel
 .env*
 /.agents/

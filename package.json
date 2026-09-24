@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:client": "esbuild client/blob-upload.js --bundle --format=iife --platform=browser --outfile=public/blob-upload.bundle.js && esbuild client/clerk.js --bundle --format=iife --platform=browser --outfile=public/clerk.bundle.js",
+    "build:client": "node scripts/build-client.mjs",
     "build": "npm run build:client && next build --webpack",
     "start": "next start",
     "dev": "next dev",
@@ -15,6 +15,7 @@
     "@ai-sdk/gateway": "^4.0.87",
     "@clerk/backend": "^3.19.0",
     "@clerk/clerk-js": "^6.33.0",
+    "@clerk/ui": "1.34.0",
     "@neondatabase/serverless": "^1.1.0",
     "@vercel/blob": "^2.8.0",
     "@vercel/sandbox": "^3.3.0",
