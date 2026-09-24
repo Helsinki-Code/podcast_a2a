@@ -333,15 +333,18 @@ export async function handler(req, res) {
       const input = await body(req, 20_000);
       const targetUrl = String(input.url || '').trim().slice(0, 1200);
       const brief = String(input.brief || '').trim().slice(0, 3000);
+      const loginUrl = String(input.loginUrl || '').trim().slice(0, 1200);
       if (!/^https?:\/\//i.test(targetUrl)) return error(res, 400, 'Enter an application URL beginning with http:// or https://.');
+      if (loginUrl && !/^https?:\/\//i.test(loginUrl)) return error(res, 400, 'The login page URL must begin with http:// or https://.');
       if (brief.length < 20) return error(res, 400, 'Describe the workflow the video should explain.');
       const item = {
         id: uid(), ownerId: auth.userId, createdAt: stamp(), status: 'draft', url: targetUrl, brief,
         title: String(input.title || new URL(targetUrl).hostname).trim().slice(0, 120),
         authRequired: !!input.authRequired,
-        usernameSelector: String(input.usernameSelector || 'input[type="email"], input[name="email"], input[name="username"]').slice(0, 300),
-        passwordSelector: String(input.passwordSelector || 'input[type="password"]').slice(0, 300),
-        submitSelector: String(input.submitSelector || 'button[type="submit"], input[type="submit"]').slice(0, 300),
+        loginUrl,
+        usernameSelector: String(input.usernameSelector || 'input[type="email"], input[autocomplete="username"], input[autocomplete="email"], input[name*="email" i], input[name*="user" i], input[id*="email" i], input[id*="user" i]').slice(0, 600),
+        passwordSelector: String(input.passwordSelector || 'input[type="password"], input[autocomplete="current-password"]').slice(0, 400),
+        submitSelector: String(input.submitSelector || 'button[type="submit"], input[type="submit"], button[name*="login" i], button[name*="sign" i]').slice(0, 400),
         speechProvider: String(input.speechProvider || 'gateway').slice(0, 40), voice: String(input.voice || 'marin').slice(0, 100)
       };
       await saveExplainer(item); return json(res, 201, item);
@@ -356,9 +359,19 @@ export async function handler(req, res) {
         const input = await body(req, 12_000);
         const credentials = { username: String(input.username || '').slice(0, 500), password: String(input.password || '').slice(0, 2000) };
         if (!credentials.username || !credentials.password) return error(res, 400, 'Login username and password are required.');
+        const loginUrl = String(input.loginUrl || item.loginUrl || '').trim().slice(0, 1200);
+        if (loginUrl && !/^https?:\/\//i.test(loginUrl)) return error(res, 400, 'The login page URL must begin with http:// or https://.');
+        const login = {
+          url: item.url,
+          loginUrl,
+          authRequired: true,
+          usernameSelector: String(input.usernameSelector || item.usernameSelector || '').slice(0, 600),
+          passwordSelector: String(input.passwordSelector || item.passwordSelector || '').slice(0, 400),
+          submitSelector: String(input.submitSelector || item.submitSelector || '').slice(0, 400)
+        };
         const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
-        await new VercelEpisodeSandbox(item.id, () => {}).login({ url: item.url, authRequired: true, usernameSelector: item.usernameSelector, passwordSelector: item.passwordSelector, submitSelector: item.submitSelector }, credentials);
-        await setExplainerFields(item.id, { browserPrepared: true, progress: 'Secure browser prepared' });
+        await new VercelEpisodeSandbox(item.id, () => {}).login(login, credentials);
+        await setExplainerFields(item.id, { ...login, browserPrepared: true, progress: 'Secure browser prepared', error: null });
         return json(res, 200, { ok: true });
       }
       if (parts[3] === 'start' && req.method === 'POST') {

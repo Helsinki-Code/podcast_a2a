@@ -26,7 +26,7 @@ function render() {
   $('#recentPersonas').innerHTML = state.personas.length ? state.personas.slice(0, 6).map(p => `<div class="persona-chip">${avatar(p)}${esc(p.name)}</div>`).join('') : '<div class="empty">Your cast starts with a persona.</div>';
   $('#personaGrid').innerHTML = state.personas.length ? state.personas.map(p => `<article class="persona-card">${avatar(p,true)}<h3>${esc(p.name)}</h3><p>${esc(p.systemPrompt)}</p><div class="persona-card-foot"><span>${p.knowledge?.length || 0} knowledge files · ${esc(p.voice)}</span><button data-edit="${p.id}">Edit →</button></div></article>`).join('') : '<div class="empty"><strong>No personas yet</strong>Create a host and a guest to begin.</div>';
   $('#episodeList').innerHTML = state.episodes.length ? state.episodes.map(e => `<article class="episode-row" data-episode="${e.id}" role="button" tabindex="0"><div><div class="eyebrow">${shortDate(e.createdAt)}</div><h3>${esc(e.outline.subject)}</h3><p>${esc(episodePerson(e,'host')?.name || 'Host')} × ${esc(episodePerson(e,'guest')?.name || 'Guest')} · ${e.turns?.length || 0} spoken segments</p></div><div class="episode-row-right"><span class="tag ${esc(e.status)}">${esc(e.status)}</span><span class="card-arrow">↗</span></div></article>`).join('') : '<div class="empty"><strong>Nothing recorded yet</strong>Create an episode to start the archive.</div>';
-  $('#explainerList').innerHTML = state.explainers.length ? state.explainers.map(e => `<article class="episode-row explainer-row"><div><div class="eyebrow">${shortDate(e.createdAt)} · ${esc(new URL(e.url).hostname)}</div><h3>${esc(e.title)}</h3><p>${esc(e.progress || e.brief)}</p></div><div class="episode-row-right"><span class="tag ${esc(e.status)}">${esc(e.status)}</span>${e.video ? `<a class="row-download" href="${esc(e.video)}" download>Download MP4</a><a class="row-download secondary" href="${esc(e.captions)}" download>Captions</a>` : ''}${e.error ? `<small class="row-error">${esc(e.error)}</small>` : ''}</div></article>`).join('') : '<div class="empty"><strong>No explainers yet</strong>Give the agent a URL and the workflow your customer needs to understand.</div>';
+  $('#explainerList').innerHTML = state.explainers.length ? state.explainers.map(e => `<article class="episode-row explainer-row"><div><div class="eyebrow">${shortDate(e.createdAt)} · ${esc(new URL(e.url).hostname)}</div><h3>${esc(e.title)}</h3><p>${esc(e.progress || e.brief)}</p></div><div class="episode-row-right"><span class="tag ${esc(e.status)}">${esc(e.status)}</span>${e.video ? `<a class="row-download" href="${esc(e.video)}" download>Download MP4</a><a class="row-download secondary" href="${esc(e.captions)}" download>Captions</a>` : ''}${e.status === 'draft' && e.authRequired ? `<button class="row-action" data-retry-explainer="${esc(e.id)}">Resume secure sign-in</button>` : ''}${e.error ? `<small class="row-error">${esc(e.error)}</small>` : ''}</div></article>`).join('') : '<div class="empty"><strong>No explainers yet</strong>Give the agent a URL and the workflow your customer needs to understand.</div>';
   renderAccount();
 }
 
@@ -275,9 +275,16 @@ function drawStage() {
 function drawPersona(ctx,p,role,img,x,y,r,speaking,color,glow=1){const power=speaking?Math.min(1,state.amplitude*4+.12):0;ctx.save();ctx.shadowColor=color;ctx.shadowBlur=speaking?(26+power*90)*glow:0;ctx.beginPath();ctx.arc(x,y,r+5+power*7,0,Math.PI*2);ctx.strokeStyle=color;ctx.globalAlpha=speaking?.5+power*.5:.25;ctx.lineWidth=(speaking?5+power*7:3)*glow;ctx.stroke();ctx.restore();ctx.save();ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.clip();if(img)ctx.drawImage(img,x-r,y-r,r*2,r*2);else{ctx.fillStyle=color;ctx.fillRect(x-r,y-r,r*2,r*2);ctx.fillStyle='#173038';ctx.font=`bold ${r}px Arial`;ctx.textAlign='center';ctx.fillText((p?.name||'?')[0].toUpperCase(),x,y+r*.35)}ctx.restore();ctx.fillStyle='#f1f5f1';ctx.font='bold 19px Arial';ctx.textAlign='center';ctx.fillText((p?.name||role).slice(0,24),x,y+r+35);ctx.fillStyle=color;ctx.font='bold 10px Arial';ctx.letterSpacing='2px';ctx.fillText(role,x,y+r+54);ctx.letterSpacing='0px';ctx.textAlign='left'}
 function tick(){if(state.recorder?.state!=='recording')return;if(state.analyser&&state.speaker){const data=new Uint8Array(state.analyser.frequencyBinCount);state.analyser.getByteFrequencyData(data);state.amplitude=data.reduce((a,b)=>a+b,0)/data.length/255}else state.amplitude*=.8;drawStage();const elapsed=Math.floor((Date.now()-state.startTime)/1000);$('#stageTimer').textContent=`${String(Math.floor(elapsed/60)).padStart(2,'0')}:${String(elapsed%60).padStart(2,'0')}`;requestAnimationFrame(tick)}
 
-function openExplainerDialog() {
-  const form = $('#explainerForm'); form.reset(); $('#explainerCredentials').classList.add('hidden');
-  for (const name of ['username','password']) form.elements[name].required = false;
+function openExplainerDialog(item = null) {
+  const form = $('#explainerForm'); form.reset(); form.dataset.explainerId = item?.id || '';
+  if (item) {
+    for (const name of ['title','url','brief','voice','loginUrl','usernameSelector','passwordSelector','submitSelector']) {
+      if (form.elements[name] && item[name] != null) form.elements[name].value = item[name];
+    }
+    form.elements.authRequired.checked = !!item.authRequired;
+  }
+  $('#explainerCredentials').classList.toggle('hidden', !form.elements.authRequired.checked);
+  for (const name of ['username','password']) form.elements[name].required = form.elements.authRequired.checked;
   $('#explainerDialog').showModal();
 }
 
@@ -287,14 +294,20 @@ async function saveExplainerForm(event) {
   try {
     const authRequired = form.elements.authRequired.checked;
     if (authRequired && (!form.elements.username.value || !form.elements.password.value)) throw new Error('Enter the login username and password.');
-    const item = await api('/api/explainers', { method: 'POST', body: JSON.stringify({
+    const existing = state.explainers.find(item => item.id === form.dataset.explainerId);
+    const item = existing || await api('/api/explainers', { method: 'POST', body: JSON.stringify({
       title: form.elements.title.value, url: form.elements.url.value, brief: form.elements.brief.value,
-      authRequired, voice: form.elements.voice.value, usernameSelector: form.elements.usernameSelector.value,
-      passwordSelector: form.elements.passwordSelector.value, submitSelector: form.elements.submitSelector.value
+      authRequired, voice: form.elements.voice.value, loginUrl: form.elements.loginUrl.value,
+      usernameSelector: form.elements.usernameSelector.value, passwordSelector: form.elements.passwordSelector.value,
+      submitSelector: form.elements.submitSelector.value
     }) });
     if (authRequired) {
       button.textContent = 'Signing in privately…';
-      await api(`/api/explainers/${item.id}/prepare`, { method: 'POST', body: JSON.stringify({ username: form.elements.username.value, password: form.elements.password.value }) });
+      await api(`/api/explainers/${item.id}/prepare`, { method: 'POST', body: JSON.stringify({
+        username: form.elements.username.value, password: form.elements.password.value,
+        loginUrl: form.elements.loginUrl.value, usernameSelector: form.elements.usernameSelector.value,
+        passwordSelector: form.elements.passwordSelector.value, submitSelector: form.elements.submitSelector.value
+      }) });
       form.elements.password.value = '';
     }
     button.textContent = 'Starting workflow…';
@@ -370,6 +383,7 @@ $('#episodeForm').elements.interjectProbability.addEventListener('input',event=>
 $('#episodeForm').elements.paneWidth.addEventListener('input',event=>{$('#paneValue').textContent=`${event.target.value}%`});
 $('#episodeForm').elements.authRequired.addEventListener('change',event=>{$('#episodeCredentials').classList.toggle('hidden',!event.target.checked);for(const name of ['demoUsername','demoPassword'])$('#episodeForm').elements[name].required=event.target.checked});
 document.addEventListener('click',event=>{const ep=event.target.closest('[data-episode]');if(ep)openStudio(ep.dataset.episode).catch(e=>notice(e.message));const edit=event.target.closest('button[data-edit]');if(edit)openPersona(person(edit.dataset.edit))});
+document.addEventListener('click', event => { const retry = event.target.closest('[data-retry-explainer]'); if (retry) openExplainerDialog(state.explainers.find(item => item.id === retry.dataset.retryExplainer)); });
 $('#backToEpisodes').addEventListener('click',()=>navigate('episodes'));
 $('#fullscreenStage').addEventListener('click',()=>$('#stage').requestFullscreen());
 $$('.side-tab').forEach(b=>b.addEventListener('click',()=>{$$('.side-tab').forEach(x=>x.classList.toggle('active',x===b));$('#transcriptPane').classList.toggle('hidden',b.dataset.side!=='transcript');$('#activityPane').classList.toggle('hidden',b.dataset.side!=='activity')}));
