@@ -68,8 +68,8 @@ function openEpisodeDialog() {
   $('#episodeCredentials').classList.add('hidden');
   for (const name of ['demoUsername','demoPassword']) $('#episodeForm').elements[name].required = false;
   const format = $('#episodeForm').elements.outputFormat;
-  for (const option of format.options) option.disabled = !!state.config?.storage?.remoteAssets && option.value !== 'webm';
-  if (state.config?.storage?.remoteAssets) format.value = 'webm';
+  for (const option of format.options) option.disabled = false;
+  format.value = 'both';
   $('#interjectValue').textContent = '3%'; $('#paneValue').textContent = '66%';
   populateSelect($('#hostSelect'), state.personas.map(p => [p.id,p.name]), state.personas[0].id);
   populateSelect($('#guestSelect'), state.personas.map(p => [p.id,p.name]), state.personas[1].id);
