@@ -15,6 +15,7 @@ import { runEpisode, stopEpisode } from './lib/engine.mjs';
 import { openLiveAudio } from './lib/audio.mjs';
 import { buildIndex } from './lib/rag.mjs';
 import { assertPublicHttpUrl } from './lib/url-security.mjs';
+import { environmentReport } from './lib/environment.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let initialization;
@@ -104,14 +105,9 @@ async function assetFile(req, res, filename) {
 
 export async function handler(req, res) {
   try {
-    await ensureInitialized();
     const url = new URL(req.url, 'http://localhost');
     const parts = url.pathname.split('/').filter(Boolean);
-    if (['/health', '/api/health'].includes(url.pathname) && req.method === 'GET') return json(res, 200, { ok: true });
-    if (url.pathname === '/api/webhooks/stripe' && req.method === 'POST') {
-      const raw = await rawBody(req, 2_000_000);
-      return json(res, 200, await processStripeWebhook(raw, req.headers['stripe-signature'] || ''));
-    }
+    if (['/health', '/api/health'].includes(url.pathname) && req.method === 'GET') return json(res, 200, { ok: true, environment: environmentReport() });
     if (url.pathname === '/' && req.method === 'GET') return staticFile(req, res, path.join(here, 'public'), 'index.html');
     if (url.pathname === '/favicon.ico' && req.method === 'GET') return staticFile(req, res, path.join(here, 'public'), 'favicon.ico');
     if (url.pathname === '/privacy' && req.method === 'GET') return staticFile(req, res, path.join(here, 'public'), 'privacy.html');
@@ -119,7 +115,12 @@ export async function handler(req, res) {
     if (parts[0] === 'public' && req.method === 'GET') return staticFile(req, res, path.join(here, 'public'), parts.slice(1).join('/'));
     if (url.pathname === '/api/config' && req.method === 'GET') {
       const providers = availableProviders();
-      return json(res, 200, { brand: 'The Sales Forge', clerkPublishableKey: process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || '', plans: publicPlans(), costs, providers, storage: { remoteAssets: usesRemoteAssets() }, realtime: process.env.VERCEL ? 'poll' : 'sse', ready: { model: Object.values(providers.ready.models).some(Boolean), sandbox: !!(process.env.VERCEL || process.env.VERCEL_OIDC_TOKEN || process.env.VERCEL_TOKEN) } });
+      return json(res, 200, { brand: 'The Sales Forge', clerkPublishableKey: process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || '', plans: publicPlans(), costs, providers, storage: { remoteAssets: usesRemoteAssets() }, realtime: process.env.VERCEL ? 'poll' : 'sse', ready: { model: Object.values(providers.ready.models).some(Boolean), sandbox: !!(process.env.VERCEL || process.env.VERCEL_OIDC_TOKEN || process.env.VERCEL_TOKEN) }, environment: environmentReport() });
+    }
+    await ensureInitialized();
+    if (url.pathname === '/api/webhooks/stripe' && req.method === 'POST') {
+      const raw = await rawBody(req, 2_000_000);
+      return json(res, 200, await processStripeWebhook(raw, req.headers['stripe-signature'] || ''));
     }
     const auth = await authenticate(req);
     if (!auth) return error(res, 401, 'Sign in to The Sales Forge.');
@@ -212,9 +213,17 @@ export async function handler(req, res) {
       const authRequired = !!input.settings?.demo?.authRequired;
       const demoLoginUrl = String(input.settings?.demo?.loginUrl || '').trim().slice(0, 1000);
       if (demoLoginUrl) await assertPublicHttpUrl(demoLoginUrl);
+      const episodeHost = structuredClone(hostPersona), episodeGuest = structuredClone(guestPersona);
+      const hostProvider = episodeHost.speechProvider || 'gateway', guestProvider = episodeGuest.speechProvider || 'gateway';
+      episodeHost.voice = supportedVoice(hostProvider, episodeHost.voice, 'coral');
+      episodeGuest.voice = supportedVoice(guestProvider, episodeGuest.voice, 'nova');
+      if (hostProvider === guestProvider && episodeHost.voice === episodeGuest.voice) {
+        const choices = availableProviders().voices[guestProvider] || [];
+        episodeGuest.voice = choices.find(voice => voice !== episodeHost.voice) || episodeGuest.voice;
+      }
       const item = {
         id: uid(), ownerId: auth.userId, createdAt: stamp(), status: 'draft', hostId: input.hostId, guestId: input.guestId,
-        personas: { host: structuredClone(hostPersona), guest: structuredClone(guestPersona) },
+        personas: { host: episodeHost, guest: episodeGuest },
         outline: { subject, angle: String(input.outline?.angle || '').slice(0, 500), points: String(input.outline?.points || '').slice(0, 2500) },
         settings: {
           interjections: input.settings?.interjections !== false,

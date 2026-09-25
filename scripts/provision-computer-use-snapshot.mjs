@@ -43,7 +43,7 @@ if ! pgrep -f 'websockify.*6080' >/dev/null; then
 fi
 if ! curl -fsS http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
   PROFILE="/tmp/chrome-profile-$(echo "$SESSION" | tr -cd 'A-Za-z0-9_-')"
-  google-chrome --no-sandbox --disable-gpu --no-first-run --disable-default-apps --disable-dev-shm-usage --disable-features=Translate --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="$PROFILE" --window-size=1920,1080 --start-maximized about:blank >/tmp/chrome.log 2>&1 &
+  google-chrome --no-sandbox --disable-gpu --no-first-run --disable-default-apps --disable-dev-shm-usage --disable-save-password-bubble --password-store=basic --disable-features=Translate,PasswordManagerOnboarding,PasswordLeakDetection --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="$PROFILE" --window-size=1920,1080 --start-maximized about:blank >/tmp/chrome.log 2>&1 &
 fi
 for i in $(seq 1 80); do curl -fsS http://127.0.0.1:9222/json/version >/dev/null 2>&1 && exit 0; sleep .25; done
 echo 'Chrome CDP did not become ready' >&2

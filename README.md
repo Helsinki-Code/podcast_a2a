@@ -22,9 +22,11 @@ A podcast costs 20 credits. A platform explainer costs 30 credits. Credit reserv
 - Clerk provides production authentication and account management.
 - Stripe Checkout creates subscriptions. Signed Stripe webhooks update subscription state and grant credits after paid invoices. Stripe’s customer portal handles payment methods, invoices, and cancellation.
 - Vercel Workflow runs podcast and explainer jobs as durable steps.
-- Vercel AI Gateway runs planning and speech generation.
+- Vercel AI Gateway routes separate host, guest, interjection, and multimodal explainer calls with per-feature usage tags and model fallbacks. Gemini 2.5 Flash Lite is the default conversational model; Gemini 3.1 Flash Lite directs screenshot-based walkthroughs.
 - Vercel Sandbox runs a persistent 1920×1080 Linux desktop with Xvnc, Openbox, noVNC, Chrome, xdotool, ImageMagick, Agent Browser, ffmpeg 7, and ffprobe.
-- The visual model observes full desktop screenshots and drives real mouse and keyboard input. Agent Browser is connected to the same Chrome instance and supplies precise DOM anchors when a small control is difficult to target visually.
+- The visual explainer director receives the current screenshot, accessibility tree, completed actions, rejected choices, and requested/completed/remaining milestones. It chooses each next action dynamically. The executor validates safety, drives real mouse and keyboard input, records the action, and rejects repeated, frozen, or incomplete scenes.
+- Podcast host and guest decisions use their own model routes. After a live browser action, the guest model receives the actual screenshot and returns podcast `segments`; explainer and podcast visual contracts are kept separate.
+- FFmpeg deterministically creates downloadable H.264/AAC MP4 and SRT assets from the event timeline. Generation waits are excluded, browser clips are preserved, action footage is aligned to narration, and media probes reject broken timestamps, missing streams, frozen video, and excessive silence.
 - Neon stores owner-scoped personas, episodes, explainers, accounts, credit ledger entries, and processed webhook IDs.
 - Private Vercel Blob stores speech, captures, subtitles, and finished videos.
 
@@ -47,7 +49,14 @@ DATABASE_URL=
 BLOB_READ_WRITE_TOKEN=
 AGENT_BROWSER_SNAPSHOT_ID=
 COMPUTER_USE_SNAPSHOT_ID=
-AI_GATEWAY_COMPUTER_MODEL=anthropic/claude-sonnet-4.5
+AI_GATEWAY_MODEL=google/gemini-2.5-flash-lite
+AI_GATEWAY_HOST_MODEL=google/gemini-2.5-flash-lite
+AI_GATEWAY_GUEST_MODEL=google/gemini-2.5-flash-lite
+AI_GATEWAY_ROUTER_MODEL=google/gemini-2.5-flash-lite
+EXPLAINER_MODEL=google/gemini-3.1-flash-lite
+AI_GATEWAY_COMPUTER_MODEL=google/gemini-3.1-flash-lite
+AI_GATEWAY_FALLBACK_MODELS=google/gemini-3.1-flash-lite
+AI_GATEWAY_VISION_FALLBACK_MODELS=google/gemini-3.1-flash-lite
 ```
 
 Vercel supplies OIDC for AI Gateway and Sandbox in deployed environments. Local development can use `AI_GATEWAY_API_KEY`; direct OpenAI speech can use `OPENAI_API_KEY`.
@@ -79,7 +88,10 @@ node scripts/check-stripe-checkout.mjs
 node scripts/check-explainer-render.mjs
 node scripts/check-computer-use-input.mjs
 node scripts/check-podcast-computer-use.mjs
+node scripts/check-podcast-gateway-plan.mjs
+node scripts/check-podcast-render.mjs
 node scripts/check-explainer-workflow.mjs
+node scripts/check-media-quality.mjs --interactive /path/to/video.mp4
 ```
 
 `scripts/saas-e2e.mjs` creates a disposable Clerk development user and Stripe test checkout, verifies the unpaid lock, signed webhooks, credits, owner isolation, podcasts, and explainers, then deletes its records.

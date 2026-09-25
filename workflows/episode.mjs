@@ -1,6 +1,7 @@
 import { defineHook, sleep } from 'workflow';
 import { demoLeadInComplete, speechPhrases } from '../lib/conversation.mjs';
 import { begin, snapshot, plan, prepareSpeech, publishSpeech, act, finish, emitInterruption, emitNotice, interjectionVerdict, expired, newEventId } from './episode-steps.mjs';
+import { renderPodcastTimeline, failPodcastRender } from './podcast-render-steps.mjs';
 
 export const playbackHook = defineHook();
 export const playbackToken = (episodeId, eventId) => `podcast:${episodeId}:${eventId}`;
@@ -112,6 +113,8 @@ export async function episodeWorkflow(episodeId, launch = {}) {
       actionsThisTurn = 0;
     }
     await finish(episodeId, (await snapshot(episodeId)).stopRequested ? 'stopped' : 'complete');
+    try { await renderPodcastTimeline(episodeId); }
+    catch (renderError) { await failPodcastRender(episodeId, renderError.message || 'Podcast rendering failed.'); }
   } catch (cause) {
     await finish(episodeId, 'failed', cause.message || 'Episode failed.');
   }

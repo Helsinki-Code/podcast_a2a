@@ -1,9 +1,11 @@
 import { explainer, setExplainerFields, putNamedAsset, refundCredits, stamp } from '../lib/store.mjs';
 import { modelProviders, speechProviders, supportedVoice } from '../lib/providers.mjs';
 import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';
+import { inspectSandboxMedia, evaluateMediaQuality } from '../lib/media-quality.mjs';
 
 const safeName = value => String(value).replace(/[^a-zA-Z0-9._-]/g, '_');
 const srtText = text => String(text).replace(/\r?\n/g, ' ').replace(/<[^>]+>/g, '');
+const consequentialControl = value => /\b(?:launch(?:\s+sending|\s+campaign)?|send(?:\s+now)?|approve\s+all|purchase|pay|subscribe|delete|remove|publish|post|archive|stop\s+campaign|clear\s+failures|retry\s+send)\b/i.test(String(value || ''));
 const validHex = (value, fallback) => /^#[0-9a-f]{6}$/i.test(value || '') ? value : fallback;
 const assColor = (hex, alpha = '00') => {
   const value = validHex(hex, '#ffffff').slice(1);
@@ -92,9 +94,11 @@ export function actionIsCompatible(action = {}, screen = {}) {
       const ref = selector.slice(1);
       const line = String(screen.content || '').split('\n').find(value => value.includes(`[ref=${ref}]`)) || '';
       if (!line) return false;
+      if (['click','double_click'].includes(type) && /\b(?:launch(?:\s+sending|\s+campaign)?|send(?:\s+now)?|approve\s+all|purchase|pay|subscribe|delete|remove|publish|post|archive|stop\s+campaign|clear\s+failures|retry\s+send)\b/i.test(line)) return false;
       if (['click','double_click','right_click'].includes(type)) return /\b(link|button|checkbox|radio|tab|menuitem|option)\b/i.test(line);
       if (type === 'type') return /\b(textbox|searchbox|input|textarea|combobox)\b/i.test(line) && Boolean(String(action.text || action.value || '').trim());
     }
+    if (['click','double_click'].includes(type) && consequentialControl(screen.content)) return false;
     const x = Number(action.x), y = Number(action.y);
     if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x >= 1920 || y < 0 || y >= 1080) return false;
     if (type === 'drag') return Number.isFinite(Number(action.endX)) && Number.isFinite(Number(action.endY));
@@ -104,6 +108,7 @@ export function actionIsCompatible(action = {}, screen = {}) {
   const ref = String(action.selector || '').replace(/^@/, '');
   const line = String(screen.content || '').split('\n').find(value => value.includes(`[ref=${ref}]`)) || '';
   if (!line) return false;
+  if (type === 'click' && /\b(?:launch(?:\s+sending|\s+campaign)?|send(?:\s+now)?|approve\s+all|purchase|pay|subscribe|delete|remove|publish|post|archive|stop\s+campaign|clear\s+failures|retry\s+send)\b/i.test(line)) return false;
   if (type === 'click') return /\b(link|button|checkbox|radio|tab|menuitem|option)\b/i.test(line);
   if (type === 'type' || type === 'fill') return /\b(textbox|searchbox|input|textarea|combobox)\b/i.test(line);
   if (type === 'select') return /\b(combobox|listbox|option|select)\b/i.test(line);
@@ -111,15 +116,17 @@ export function actionIsCompatible(action = {}, screen = {}) {
   return false;
 }
 
-export async function normalizeSceneVideo(browser, inputPath, outputPath, duration) {
+export async function normalizeSceneVideo(browser, inputPath, outputPath, duration, options = {}) {
   const length = String(Math.max(2, Math.min(40, Number(duration) || 8)));
-  const videoFilter = 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,fps=30';
+  const sourceProbe = await browser.run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', inputPath]);
+  const sourceDuration = Number((await sourceProbe.stdout()).trim()) || Number(length);
+  const playbackRatio = Math.max(.2, Math.min(4, Number(length) / sourceDuration));
+  const videoFilter = `setpts=${playbackRatio.toFixed(6)}*PTS,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,fps=30`;
   let result = await browser.run('ffmpeg', ['-y', '-fflags', '+genpts', '-i', inputPath, '-t', length, '-an', '-vf', videoFilter, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', outputPath], 10 * 60 * 1000);
-  if (!result.exitCode) return { path: outputPath, usedScreenshotFallback: false };
-  const recordingError = (await result.stderr()).slice(-1200);
-  result = await browser.run('ffmpeg', ['-y', '-loop', '1', '-framerate', '30', '-i', '/tmp/podcast-browser.png', '-t', length, '-an', '-vf', videoFilter, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', outputPath], 10 * 60 * 1000);
-  if (result.exitCode) throw new Error(`Browser recording and screenshot fallback both failed. Recording: ${recordingError} Fallback: ${(await result.stderr()).slice(-1200)}`);
-  return { path: outputPath, usedScreenshotFallback: true };
+  if (result.exitCode) throw new Error(`The live browser recording is invalid and cannot be used: ${(await result.stderr()).slice(-1200)}`);
+  const metrics = await inspectSandboxMedia(browser, outputPath, { sceneThreshold: 0.008, ignoreCaptionBand: false });
+  if (!metrics.video || metrics.duration < 1 || (options.requireMotion !== false && metrics.uniqueFrames < 2)) throw new Error('The live browser recording is empty or effectively frozen.');
+  return { path: outputPath, usedScreenshotFallback: false, metrics };
 }
 
 export async function beginExplainer(id) {
@@ -140,19 +147,58 @@ export async function explainerSceneBudget(id) {
   return Math.max(4, Math.min(20, explicitSteps ? explicitSteps + 3 : Math.ceil(words / 14) + 4));
 }
 
-export async function planScene(id, screen, history, index, finalAllowedScene = false) {
+export function requiredActionKinds(brief = '') {
+  const text = String(brief).toLowerCase();
+  const required = [];
+  if (/\bscroll(?:ing|ed)?\b/.test(text)) required.push('scroll');
+  if (/\b(?:type|typing|enter|fill|write)\b/.test(text)) required.push('type');
+  if (/\b(?:click|open|navigate|select|choose)\b/.test(text)) required.push('navigate');
+  return required;
+}
+
+export function explainerActionKind(action = {}) {
+  return ['click','double_click','right_click','visit','select','press'].includes(action.type) ? 'navigate' : String(action.type || 'wait');
+}
+
+export function buildExplainerDirectorState(requiredKinds, timeline, history, screen, index, sceneBudget) {
+  const completedMilestones = [...new Set(timeline.map(part => explainerActionKind(part.action)))];
+  const requestedMilestones = [...new Set(requiredKinds)];
+  return {
+    requestedMilestones,
+    completedMilestones,
+    remainingMilestones: requestedMilestones.filter(kind => !completedMilestones.includes(kind)),
+    previousActions: history.filter(entry => entry.action).map(entry => ({ action: entry.action, narration: entry.narration, screenChanged: entry.screenChanged })),
+    rejectedDecisions: history.filter(entry => entry.rejected).slice(-6).map(entry => entry.rejected),
+    currentScreen: { title: screen.title, accessibility: screen.content },
+    scene: { number: index + 1, estimatedBudget: sceneBudget, estimatedBudgetReached: index >= sceneBudget - 1 },
+    allowedActions: process.env.COMPUTER_USE_SNAPSHOT_ID
+      ? ['click','double_click','right_click','type','key','scroll','drag','visit','wait']
+      : ['click','type','select','press','scroll','visit','wait'],
+    forbiddenControls: ['send','pay','purchase','subscribe','delete','remove','publish','post','launch','approve all','archive','stop campaign','clear failures']
+  };
+}
+
+export async function explainerRequirements(id) {
   'use step';
   const item = await explainer(id);
-  await setExplainerFields(id, { progress: `Directing scene ${index + 1}` });
+  return requiredActionKinds(item?.brief);
+}
+
+export async function planScene(id, directorState) {
+  'use step';
+  const item = await explainer(id);
+  await setExplainerFields(id, { progress: `Directing scene ${directorState.scene.number}` });
   const provider = modelProviders.get('gateway');
   const computerUse = Boolean(process.env.COMPUTER_USE_SNAPSHOT_ID);
   const system = computerUse
     ? `You direct a continuous product walkthrough by looking at a 1920x1080 screenshot and operating the visible desktop like a careful human. Return one JSON object with narration, action, and done. Actions: {"type":"click","selector":"@e2","x":500,"y":300}, {"type":"double_click","selector":"@e2","x":500,"y":300}, {"type":"right_click","selector":"@e2","x":500,"y":300}, {"type":"type","selector":"@e4","x":500,"y":300,"text":"visible demo value"}, {"type":"key","key":"Return"}, {"type":"scroll","direction":"down","amount":5}, {"type":"drag","x":400,"y":300,"endX":800,"endY":300}, {"type":"visit","url":"https://..."}, or {"type":"wait","ms":800}. Coordinates refer to the supplied screenshot. When the accessibility snapshot contains the intended web control, include its exact @e ref as selector and also provide the visible approximate coordinates. Use coordinates alone for canvas, remote desktop, or other targets without a ref. The screenshot is primary visual context; the ref anchors small targets reliably. Use an ordinary left click for web links, buttons, and controls. Use double click, right click, or drag only when the requested workflow explicitly requires that gesture. Every scene must advance the requested workflow or reveal a new part of the interface. Never repeat an action, screen, named section, typed field, or narration. After one scroll, interact with a newly visible control or finish. Prefer one safe reversible visible interaction in each scene. Keep narration between 12 and 28 words and introduce the action that happens during the sentence. Never delete, purchase, publish, send messages, change account settings, log out, or submit irreversible forms. Set done true as soon as the requested coverage is complete. Do not mention automation, coordinates, credentials, or that you are an AI.`
     : `You direct a continuous, human-operated premium product walkthrough. Return one JSON object with narration, action, and done. The action is one of: {"type":"click","selector":"@e1"}, {"type":"type","selector":"@e1","value":"visible demo value"}, {"type":"select","selector":"@e1","value":"option value"}, {"type":"press","selector":"@e1","key":"ArrowRight"}, {"type":"scroll","direction":"down","amount":900}, {"type":"visit","url":"https://..."}, or {"type":"wait","ms":800}. Use only element refs visible in the current accessibility snapshot. Click only refs labeled link, button, checkbox, radio, tab, menuitem, or option. Type only into refs labeled textbox, searchbox, input, textarea, or combobox. Every scene must advance the requested workflow or reveal a new part of the interface. Never repeat any prior action, screen, named section, typed field, or narration. One scroll scene is enough to reveal a section; after scrolling, interact with a new visible control or set done true. Prefer one visible, reversible interaction in every scene; use wait only for the opening or final wrap-up. Use type rather than fill so real keystrokes appear in the recording. Keep narration between 12 and 28 words and time it as a human explanation of the action occurring now. Describe only what is visible or what this scene's action will visibly demonstrate. Stay read-only unless the user's brief explicitly requires a safe reversible submission: never delete, submit payments, change account settings, log out, send messages, or publish content. Set done true immediately after the requested workflow has been covered. Do not mention automation, selectors, credentials, or that you are an AI.`;
-  const context = `Application: ${item.url}\nRequested coverage: ${item.brief}\nScene: ${index + 1}${finalAllowedScene ? '\nThis is the final safe scene budget. Cover the most important remaining visible point and set done true.' : ''}\nCompleted scene history (do not repeat any narration or action):\n${JSON.stringify(history)}\nCurrent page: ${screen.title}\nAccessibility snapshot:\n${screen.content}`;
-  if (!computerUse) return provider.generate([{ role: 'system', content: system }, { role: 'user', content: context }], process.env.EXPLAINER_MODEL || process.env.AI_GATEWAY_MODEL);
+  const context = `Application: ${item.url}\nRequested coverage: ${item.brief}\nDirector state:\n${JSON.stringify(directorState)}\nChoose the next action from allowedActions. Use remainingMilestones to decide what the walkthrough still needs. Prioritize the first remaining milestone before optional exploration whenever the current screen can perform it. A milestone counts only after a recorded action visibly completes it.${directorState.scene.estimatedBudgetReached && directorState.remainingMilestones.length ? ` The next action must satisfy one of these remaining milestones: ${directorState.remainingMilestones.join(', ')}.` : ''} Set done true only when remainingMilestones is empty and this scene completes the requested coverage.`;
+  const model = process.env.EXPLAINER_MODEL || 'google/gemini-3.1-flash-lite';
+  const routing = { user: item.ownerId, tags: ['feature:explainer-director', `mode:${computerUse ? 'computer-use' : 'browser'}`] };
+  if (!computerUse) return provider.generate([{ role: 'system', content: system }, { role: 'user', content: context }], model, routing);
   const capture = await new VercelEpisodeSandbox(id, () => {}).captureForModel(item.url);
-  return provider.generateVisual([{ role: 'system', content: system }, { role: 'user', content: `${context}\nThe attached image is the current live desktop screenshot.` }], capture.image, process.env.AI_GATEWAY_COMPUTER_MODEL || process.env.EXPLAINER_MODEL);
+  return provider.generateVisual([{ role: 'system', content: system }, { role: 'user', content: `${context}\nThe attached image is the current live desktop screenshot.` }], capture.image, model, routing);
 }
 
 export async function renderScene(id, index, narration, action) {
@@ -173,7 +219,6 @@ export async function renderScene(id, index, narration, action) {
   const probe = await browser.run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audioPath]);
   const speechDuration = Math.max(2, Math.min(40, Number((await probe.stdout()).trim()) || 8));
   const recordingStarted = Date.now();
-  let recordedMs = speechDuration * 1000;
   await browser.startVideo(rawVideoPath);
   try {
     await browser.command(['wait', '450']);
@@ -182,16 +227,15 @@ export async function renderScene(id, index, narration, action) {
     const remaining = speechDuration * 1000 - (Date.now() - recordingStarted);
     if (remaining > 0) await browser.command(['wait', String(Math.ceil(Math.max(500, remaining)))]);
   } finally {
-    recordedMs = Date.now() - recordingStarted;
     await browser.stopVideo().catch(() => {});
   }
   const screen = await browser.capture(null, item.url);
-  const duration = Math.max(speechDuration, Math.min(40, recordedMs / 1000));
-  const normalized = await normalizeSceneVideo(browser, rawVideoPath, videoPath, duration);
+  const duration = speechDuration;
+  const normalized = await normalizeSceneVideo(browser, rawVideoPath, videoPath, duration, { requireMotion: action.type !== 'wait' });
   const paddedAudioPath = `/tmp/explainer-${index}.m4a`;
   const padded = await browser.run('ffmpeg', ['-y', '-i', audioPath, '-af', 'apad', '-t', String(duration), '-c:a', 'aac', '-b:a', '192k', paddedAudioPath], 5 * 60 * 1000);
   if (padded.exitCode) throw new Error(`Could not align narration with the recorded action: ${(await padded.stderr()).slice(-1000)}`);
-  return { duration, captionDuration: speechDuration, video: normalized.path, audio: paddedAudioPath, screen, action, usedScreenshotFallback: normalized.usedScreenshotFallback };
+  return { duration, captionDuration: speechDuration, video: normalized.path, audio: paddedAudioPath, screen, action, usedScreenshotFallback: normalized.usedScreenshotFallback, metrics: normalized.metrics };
 }
 
 export async function finishExplainer(id, timeline) {
@@ -206,20 +250,23 @@ export async function finishExplainer(id, timeline) {
   await browser.writeSandboxFile('/tmp/videos.txt', videoList);
   await browser.writeSandboxFile('/tmp/audio.txt', audioList);
   await browser.writeSandboxFile('/tmp/captions.srt', captions);
-  let result = await browser.run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', '/tmp/videos.txt', '-c', 'copy', '-movflags', '+faststart', '/tmp/picture.mp4'], 10 * 60 * 1000);
-  if (result.exitCode) {
-    result = await browser.run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', '/tmp/videos.txt', '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '/tmp/picture.mp4'], 10 * 60 * 1000);
-  }
+  let result = await browser.run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', '/tmp/videos.txt', '-an', '-vf', 'fps=30,format=yuv420p', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '/tmp/picture.mp4'], 10 * 60 * 1000);
   if (result.exitCode) throw new Error(`Could not assemble browser recording: ${(await result.stderr()).slice(-1200)}`);
   result = await browser.run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', '/tmp/audio.txt', '-c:a', 'aac', '-b:a', '192k', '/tmp/narration.m4a'], 10 * 60 * 1000);
   if (result.exitCode) throw new Error(`Could not assemble narration: ${(await result.stderr()).slice(-1200)}`);
   const finalArgs = ['-y', '-i', '/tmp/picture.mp4', '-i', '/tmp/narration.m4a', ...(captionOptions.enabled === false ? [] : ['-vf', explainerCaptionFilter(captionOptions)]), '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-shortest', '/tmp/final.mp4'];
   result = await browser.run('ffmpeg', finalArgs, 15 * 60 * 1000);
   if (result.exitCode) throw new Error(`Could not render the final video: ${(await result.stderr()).slice(-1200)}`);
+  const quality = await inspectSandboxMedia(browser, '/tmp/final.mp4', { sceneThreshold: 0.008 });
+  const interactiveActions = timeline.filter(part => !['wait'].includes(part.action?.type));
+  quality.sceneChanges = interactiveActions.filter(part => part.screenChanged).length;
+  quality.uniqueFrames = interactiveActions.reduce((sum, part) => sum + Number(part.metrics?.uniqueFrames || 0), 0);
+  const verdict = evaluateMediaQuality(quality, { interactive: interactiveActions.length > 0, minDuration: Math.max(4, timeline.length * 1.5), maxSilencePercent: 35, maxSilenceSeconds: 2 });
+  if (!verdict.passed) throw new Error(`Explainer quality check failed: ${verdict.failures.join(' ')}`);
   const [video, srt] = await Promise.all([browser.readSandboxFile('/tmp/final.mp4'), browser.readSandboxFile('/tmp/captions.srt')]);
   const stem = `explainer-${safeName(id)}`;
   const [videoUrl, captionsUrl] = await Promise.all([putNamedAsset(`${stem}.mp4`, video), putNamedAsset(`${stem}.srt`, srt)]);
-  await setExplainerFields(id, { status: 'complete', progress: 'Complete', endedAt: stamp(), video: videoUrl, captions: captionsUrl, transcript: timeline.map(part => part.text), actions: timeline.map(part => part.action) });
+  await setExplainerFields(id, { status: 'complete', progress: 'Complete', endedAt: stamp(), video: videoUrl, captions: captionsUrl, transcript: timeline.map(part => part.text), actions: timeline.map(part => part.action), quality });
   await browser.close().catch(() => {});
 }
 

@@ -4,7 +4,7 @@ import { neon } from '@neondatabase/serverless';
 import { del, get, head } from '@vercel/blob';
 import { uid, stamp, initStore, saveExplainer, explainer } from '../lib/store.mjs';
 import { explainerWorkflow } from '../workflows/explainer.mjs';
-import { actionFingerprint } from '../workflows/explainer-steps.mjs';
+import { actionFingerprint, explainerActionKind, requiredActionKinds } from '../workflows/explainer-steps.mjs';
 
 const id = uid();
 const ownerId = `explainer_workflow_check_${Date.now()}`;
@@ -12,12 +12,16 @@ const sql = neon(process.env.DATABASE_URL || process.env.POSTGRES_URL);
 let final;
 try {
   await initStore();
-  await saveExplainer({ id, ownerId, createdAt: stamp(), status: 'draft', title: 'Example Domain Overview', url: 'https://example.com', brief: 'Explain what the Example Domain page is for, open its Learn more link, scroll through the destination, and finish after showing one new section.', authRequired: false, speechProvider: 'gateway', voice: 'alloy', captionStyle: 'editorial', captionOptions: { enabled: true, font: 'serif', size: 21, textColor: '#fff6df', backgroundColor: '#16252a', position: 'bottom', wordsPerCue: 5 } });
+  const brief = 'Explain the opening summary, scroll down through the article, open one visible safe informational section link, and finish after showing the destination.';
+  await saveExplainer({ id, ownerId, createdAt: stamp(), status: 'draft', title: 'Podcast Article Overview', url: 'https://en.wikipedia.org/wiki/Podcast', brief, authRequired: false, speechProvider: 'gateway', voice: 'alloy', captionStyle: 'editorial', captionOptions: { enabled: true, font: 'serif', size: 21, textColor: '#fff6df', backgroundColor: '#16252a', position: 'bottom', wordsPerCue: 5 } });
   await explainerWorkflow(id);
   final = await explainer(id);
   if (final.status !== 'complete') console.error(JSON.stringify({ status: final.status, error: final.error, transcript: final.transcript, actions: final.actions }, null, 2));
   if (final.status !== 'complete' || !final.video || !final.captions || !final.transcript?.length || !final.actions?.length) throw new Error(`Explainer workflow ended as ${final.status}: ${final.error || 'missing output'}`);
   const fingerprints = final.actions.map(actionFingerprint);
+  const completedKinds = new Set(final.actions.map(explainerActionKind));
+  const missingKinds = requiredActionKinds(brief).filter(kind => !completedKinds.has(kind));
+  if (missingKinds.length) throw new Error(`The explainer omitted requested action milestones: ${missingKinds.join(', ')}`);
   if (new Set(fingerprints).size !== fingerprints.length) throw new Error(`The explainer repeated a browser action: ${fingerprints.join(', ')}`);
   if (new Set(final.transcript.map(text => text.trim().toLowerCase())).size !== final.transcript.length) throw new Error('The explainer repeated a narration scene.');
   if (!final.actions.some(action => ['click','type','scroll','select','press'].includes(action?.type))) throw new Error('The explainer completed without a visible human browser interaction.');

@@ -14,8 +14,12 @@ const { runEpisode } = await import('../lib/engine.mjs');
 const { retrieve, buildIndex } = await import('../lib/rag.mjs');
 const { startSpeech, openLiveAudio } = await import('../lib/audio.mjs');
 const { demoLeadInComplete, ownContext, speechPhrases } = await import('../lib/conversation.mjs');
-const { buildCaptions, captionChunks, explainerCaptionFilter, explainerSceneBudget, actionFingerprint, actionIsCompatible } = await import('../workflows/explainer-steps.mjs');
+const { buildCaptions, captionChunks, explainerCaptionFilter, explainerSceneBudget, requiredActionKinds, actionFingerprint, actionIsCompatible, buildExplainerDirectorState } = await import('../workflows/explainer-steps.mjs');
 const { isSandboxNameConflict } = await import('../lib/vercel-sandbox.mjs');
+const { parseProbeJson, parseSilenceLog, evaluateMediaQuality } = await import('../lib/media-quality.mjs');
+const { podcastTimeline, podcastCaptions } = await import('../lib/podcast-timeline.mjs');
+const { environmentReport } = await import('../lib/environment.mjs');
+const { episodePlanHasContent } = await import('../lib/episode-plan.mjs');
 const { assertPublicHttpUrl, isPrivateAddress } = await import('../lib/url-security.mjs');
 await store.initStore();
 
@@ -92,6 +96,11 @@ test('explainer action history has stable fingerprints that prevent repeated sce
   assert.equal(actionIsCompatible({ type: 'click', selector: '@e1' }, screen), false);
   assert.equal(actionIsCompatible({ type: 'click', selector: '@e2' }, screen), true);
   assert.equal(actionIsCompatible({ type: 'type', selector: '@e3', value: 'example.com' }, screen), true);
+  const consequential = { content: '- button "Approve all" [ref=e8]\n- button "Launch Campaign" [ref=e9]\n- button "Review sequences" [ref=e10]' };
+  assert.equal(actionIsCompatible({ type: 'click', selector: '@e8' }, consequential), false);
+  assert.equal(actionIsCompatible({ type: 'click', selector: '@e9' }, consequential), false);
+  assert.equal(actionIsCompatible({ type: 'click', selector: '@e10' }, consequential), true);
+  assert.equal(actionIsCompatible({ type: 'click', x: 500, y: 400 }, consequential), false);
 });
 
 test('explainer scene budget follows the requested brief instead of a fixed scene count', async () => {
@@ -99,6 +108,75 @@ test('explainer scene budget follows the requested brief instead of a fixed scen
   const detailed = { ...short, id: store.uid(), title: 'Detailed', brief: '- Open the dashboard\n- Review the pipeline\n- Open one account\n- Explain its activity\n- Return to the dashboard\n- Show reports' };
   await store.saveExplainer(short); await store.saveExplainer(detailed);
   assert.notEqual(await explainerSceneBudget(short.id), await explainerSceneBudget(detailed.id));
+});
+
+test('explainer completion requirements follow interaction verbs in the brief', () => {
+  assert.deepEqual(requiredActionKinds('Open New Campaign, enter a website, then scroll through the results.'), ['scroll', 'type', 'navigate']);
+  assert.deepEqual(requiredActionKinds('Explain the visible dashboard without interacting.'), []);
+});
+
+test('explainer director receives structured live milestone state', () => {
+  const state = buildExplainerDirectorState(
+    ['navigate', 'scroll'],
+    [{ action: { type: 'click', selector: '@e2' } }],
+    [{ narration: 'Open the campaigns page.', action: { type: 'click', selector: '@e2' }, screenChanged: true }, { rejected: 'Do not repeat that link.' }],
+    { title: 'Campaigns', content: '- link "New Campaign" [ref=e3]' },
+    4,
+    5
+  );
+  assert.deepEqual(state.requestedMilestones, ['navigate', 'scroll']);
+  assert.deepEqual(state.completedMilestones, ['navigate']);
+  assert.deepEqual(state.remainingMilestones, ['scroll']);
+  assert.equal(state.scene.estimatedBudgetReached, true);
+  assert.match(state.currentScreen.accessibility, /New Campaign/);
+  assert.equal(state.previousActions.length, 1);
+  assert.equal(state.rejectedDecisions.length, 1);
+});
+
+test('media quality rejects frozen interactive video and excessive silence', () => {
+  const probe = parseProbeJson({ format: { duration: '141.3', size: '55720230', format_name: 'matroska,webm' }, streams: [{ codec_type: 'video', codec_name: 'vp9', width: 1920, height: 1080, avg_frame_rate: '60/1' }, { codec_type: 'audio', codec_name: 'opus', sample_rate: '48000', channels: 2 }] });
+  assert.equal(probe.duration, 141.3);
+  assert.equal(probe.video.frameRate, 60);
+  const silence = parseSilenceLog('silence_start: 0.025\nsilence_end: 12.254625 | silence_duration: 12.229625\nsilence_start: 16.426938\nsilence_end: 26.366104 | silence_duration: 9.939166', probe.duration);
+  const verdict = evaluateMediaQuality({ ...probe, sceneChanges: 0, uniqueFrames: 1, silence, timestampErrors: 3 }, { interactive: true });
+  assert.equal(verdict.passed, false);
+  assert.match(verdict.failures.join(' '), /no meaningful visual changes/i);
+  assert.match(verdict.failures.join(' '), /longest unintended silence/i);
+  assert.match(verdict.failures.join(' '), /timestamps/i);
+});
+
+test('media quality accepts a changing narrated MP4', () => {
+  const verdict = evaluateMediaQuality({ duration: 45, video: { codec: 'h264' }, audio: { codec: 'aac' }, sceneChanges: 8, uniqueFrames: 70, silence: { percentage: 4, longest: .4 }, timestampErrors: 0 }, { interactive: true, minDuration: 20 });
+  assert.deepEqual(verdict, { passed: true, failures: [] });
+});
+
+test('podcast timeline excludes generation waits and includes browser action media', () => {
+  const events = [
+    { type: 'thinking', at: '2026-01-01T00:00:00Z', role: 'host' },
+    { type: 'speech', at: '2026-01-01T00:00:14Z', role: 'host', text: 'Welcome to the show.', audio: '/api/audio/a' },
+    { type: 'thinking', at: '2026-01-01T00:00:40Z', role: 'guest' },
+    { type: 'speech', at: '2026-01-01T00:01:02Z', role: 'guest', text: 'I will show the product.', audio: '/api/audio/b' },
+    { type: 'tool_end', at: '2026-01-01T00:02:00Z', role: 'guest', tool: 'browser', screen: { video: '/assets/action.mp4', image: '/assets/screen.png' } },
+    { type: 'speech', at: '2026-01-01T00:03:30Z', role: 'host', text: 'The dashboard is visible now.', audio: '/api/audio/c' }
+  ];
+  const timeline = podcastTimeline(events);
+  assert.deepEqual(timeline.map(item => item.type), ['speech', 'speech', 'browser', 'speech']);
+  assert.equal(timeline[3].screen, '/assets/screen.png');
+  assert.equal(timeline.some(item => item.type === 'thinking'), false);
+  const captions = podcastCaptions([{ ...timeline[0], start: 0, audioDuration: 2 }, { ...timeline[1], start: 2.14, audioDuration: 2.5 }]);
+  assert.match(captions, /HOST: Welcome to the show/);
+  assert.match(captions, /GUEST: I will show the product/);
+  assert.doesNotMatch(captions, /00:01:02/);
+});
+
+test('environment report names missing configuration without exposing values or requiring E2B', () => {
+  const report = environmentReport({ DATABASE_URL: 'secret-db', NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: 'pk', CLERK_SECRET_KEY: 'sk', BLOB_READ_WRITE_TOKEN: 'blob', STRIPE_SECRET_KEY: 'stripe', STRIPE_WEBHOOK_SECRET: 'wh', STRIPE_PRICE_STARTER: 'a', STRIPE_PRICE_PRO: 'b', STRIPE_PRICE_SCALE: 'c', COMPUTER_USE_SNAPSHOT_ID: 'snap', VERCEL: '1' });
+  assert.equal(report.ready, true);
+  assert.doesNotMatch(JSON.stringify(report), /secret-db|stripe|blob/);
+  assert.equal(JSON.stringify(report).includes('E2B_TEMPLATE'), false);
+  const missing = environmentReport({ VERCEL: '1' });
+  assert.equal(missing.ready, false);
+  assert.ok(missing.features.auth.missing.includes('CLERK_SECRET_KEY'));
 });
 
 test('guest context requires a real browser demo without exposing login secrets', () => {
@@ -116,6 +194,14 @@ test('podcast opening keeps browser actions behind a two-way conversation lead-i
   const text = JSON.stringify(ownContext(episode, 'guest', { systemPrompt: 'Explain clearly.', knowledge: [] }, { type: 'idle' }, 'turn'));
   assert.equal(demoLeadInComplete(episode), false);
   assert.match(text, /do not use the browser yet/);
+});
+
+test('podcast visual plans must contain usable speech or actions', () => {
+  assert.equal(episodePlanHasContent({ narration: 'Wrong explainer shape', action: { type: 'click' }, done: false }), false);
+  assert.equal(episodePlanHasContent({ segments: [] }), false);
+  assert.equal(episodePlanHasContent({ segments: [{ type: 'speak', text: 'I can see the dashboard now.' }] }), true);
+  assert.equal(episodePlanHasContent({ segments: [{ type: 'act', tool: 'browser', input: { action: 'scroll' } }] }), true);
+  assert.equal(episodePlanHasContent({ interrupt: false }, 'interrupt'), true);
 });
 
 test('restart copies production inputs into a clean attempt without reusing outputs or charges', async () => {

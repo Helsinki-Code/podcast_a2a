@@ -151,6 +151,9 @@ async function pollEpisode(id) {
     for (const event of fresh.events || []) processEvent(event);
     state.current.video = fresh.video;
     state.current.mp4 = fresh.mp4;
+    state.current.captions = fresh.captions;
+    state.current.videoStatus = fresh.videoStatus;
+    state.current.videoError = fresh.videoError;
     renderDownloads();
   } catch (cause) {
     if (!state.ended) notice(`Live update failed: ${cause.message}`);
@@ -162,8 +165,9 @@ function renderDownloads() {
   const e = state.current; const transcript = new Blob([e.turns.map(t => `${t.role.toUpperCase()}: ${t.text}`).join('\n\n')], { type: 'text/plain' });
   const transcriptUrl = URL.createObjectURL(transcript);
   const stem = e.outline.subject.replace(/[^a-z0-9]/gi,'-').replace(/-+/g,'-').replace(/^-|-$/g,'') || 'podcast';
-  const video = e.mp4 || e.video || state.localVideoUrl;
-  $('#downloads').innerHTML = `${video ? `<a class="video-download" href="${esc(video)}" download="${esc(stem)}.${e.mp4 ? 'mp4' : 'webm'}">↓ Download finished video</a>` : ''}${e.videoStatus==='processing'?'<span class="hint">MP4 is being prepared…</span>':''}${e.videoStatus==='failed'?`<span class="row-error">${esc(e.videoError||'MP4 conversion failed. The WebM copy is available.')}</span>`:''}<a href="${transcriptUrl}" download="${esc(stem)}-transcript.txt">↓ Transcript</a><a href="/api/episodes/${e.id}" download="episode.json" target="_blank">Episode data ↗</a>${e.mp4 && e.video ? `<a href="${esc(e.video)}" download="${esc(stem)}.webm">↓ WebM copy</a>` : ''}`;
+  const localFallback = state.config?.storage?.remoteAssets ? null : state.localVideoUrl;
+  const video = e.mp4 || e.video || localFallback;
+  $('#downloads').innerHTML = `${video ? `<a class="video-download" href="${esc(video)}" download="${esc(stem)}.${e.mp4 ? 'mp4' : 'webm'}">↓ Download finished video</a>` : ''}${e.captions?`<a class="video-download secondary" href="${esc(e.captions)}" download="${esc(stem)}.srt">↓ Download captions</a>`:''}${e.videoStatus==='processing'?'<span class="hint">The edited MP4 and captions are being prepared…</span>':''}${e.videoStatus==='failed'?`<span class="row-error">${esc(e.videoError||'The final media failed quality validation.')}</span>`:''}<a href="${transcriptUrl}" download="${esc(stem)}-transcript.txt">↓ Transcript</a><a href="/api/episodes/${e.id}" download="episode.json" target="_blank">Episode data ↗</a>${e.mp4 && e.video ? `<a href="${esc(e.video)}" download="${esc(stem)}.webm">↓ WebM source copy</a>` : ''}`;
   const player = $('#reviewPlayer');
   player.classList.toggle('hidden', !video);
   if (video && player.dataset.source !== video) { player.dataset.source = video; player.src = video; }
@@ -172,9 +176,9 @@ async function pollPodcastVideo(id) {
   if (state.current?.id !== id) return;
   try {
     const fresh = await api(`/api/episodes/${id}`);
-    Object.assign(state.current, { video: fresh.video, mp4: fresh.mp4, videoStatus: fresh.videoStatus, videoError: fresh.videoError });
+    Object.assign(state.current, { video: fresh.video, mp4: fresh.mp4, captions: fresh.captions, videoStatus: fresh.videoStatus, videoError: fresh.videoError, quality: fresh.quality });
     renderDownloads();
-    if (fresh.videoStatus === 'processing') setTimeout(() => pollPodcastVideo(id), 2500);
+    if (!fresh.videoStatus || fresh.videoStatus === 'processing') setTimeout(() => pollPodcastVideo(id), 2500);
     else if (fresh.mp4) notice('The MP4 is ready to download.', true);
   } catch (error) { notice(`Could not check MP4 progress: ${error.message}`); }
 }
@@ -291,6 +295,13 @@ async function startRecording() {
   initializeAudioGraph();
   if (state.audioUnlock) await state.audioUnlock;
   if (state.audioContext.state === 'suspended') await state.audioContext.resume();
+  if (state.config?.storage?.remoteAssets) {
+    state.recorderChunks = [];
+    state.recorder = { state: 'recording', serverTimeline: true };
+    state.startTime = Date.now(); state.ended = false;
+    requestAnimationFrame(tick);
+    return;
+  }
   const stream = new MediaStream([...canvas.captureStream(30).getTracks(), ...state.audioDestination.stream.getTracks()]);
   const mime = ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'].find(x => MediaRecorder.isTypeSupported(x));
   state.recorderChunks = []; state.recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 5_000_000 });
@@ -300,6 +311,14 @@ async function startRecording() {
 }
 async function finishRecording() {
   const recorder = state.recorder; if (!recorder || recorder.state === 'inactive') return;
+  if (recorder.serverTimeline) {
+    recorder.state = 'inactive';
+    state.current.videoStatus = state.current.videoStatus === 'failed' ? 'failed' : 'processing';
+    renderDownloads();
+    notice('The edited MP4 and captions are being assembled from the completed media timeline.', true);
+    pollPodcastVideo(state.current.id);
+    return;
+  }
   await new Promise(resolve => { recorder.addEventListener('stop', resolve, { once: true }); recorder.stop(); });
   const blob = new Blob(state.recorderChunks, { type: recorder.mimeType || 'video/webm' });
   if (!blob.size) return;
