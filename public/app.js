@@ -349,7 +349,7 @@ async function playScreenVideo(url) {
   catch (error) { notice(`Desktop action playback failed: ${error.message || error}`); }
   finally { state.screenVideoPlaying = false; if (state.screenVideoElement === video) state.screenVideoElement = null; maybeFinish(); }
 }
-function waitForTail(element, leadSeconds = .14) {
+function waitForTail(element, leadSeconds = .28) {
   return new Promise(resolve => {
     let settled = false;
     const finish = () => { if (settled) return; settled = true; element.removeEventListener('timeupdate', check); element.removeEventListener('ended', finish); resolve(); };

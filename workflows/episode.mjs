@@ -1,15 +1,15 @@
 import { defineHook, sleep } from 'workflow';
-import { demoLeadInComplete, speechPhrases } from '../lib/conversation.mjs';
+import { demoLeadInComplete, speechBlocks, speechPhrases } from '../lib/conversation.mjs';
 import { begin, snapshot, plan, prepareSpeech, publishSpeech, act, finish, emitInterruption, emitNotice, interjectionVerdict, expired, newEventId } from './episode-steps.mjs';
 import { renderPodcastTimeline, failPodcastRender } from './podcast-render-steps.mjs';
 
 export const playbackHook = defineHook();
 export const playbackToken = (episodeId, eventId) => `podcast:${episodeId}:${eventId}`;
 
-function firstSpeech(response) {
+function firstSpeech(response, role) {
   for (const segment of Array.isArray(response?.segments) ? response.segments : []) {
     if (segment.type !== 'speak') continue;
-    const phrase = speechPhrases(String(segment.text || '').trim().slice(0, 3500))[0];
+    const phrase = (role === 'guest' ? speechBlocks : speechPhrases)(String(segment.text || '').trim().slice(0, 3500))[0];
     if (phrase) return phrase;
   }
   return '';
@@ -43,7 +43,7 @@ export async function episodeWorkflow(episodeId, launch = {}) {
       for (const segment of segments) {
         if ((await snapshot(episodeId)).stopRequested) break;
         if (segment.type === 'speak') {
-          const phrases = speechPhrases(String(segment.text || '').trim().slice(0, 3500));
+          const phrases = (role === 'guest' ? speechBlocks : speechPhrases)(String(segment.text || '').trim().slice(0, 3500));
           let preparedPhrase = prefetchedSpeech?.role === role && prefetchedSpeech.text === phrases[0] ? prefetchedSpeech.prepared : null;
           prefetchedSpeech = null;
           for (let index = 0; index < phrases.length; index++) {
@@ -65,7 +65,7 @@ export async function episodeWorkflow(episodeId, launch = {}) {
               : nextPlan
                 ? (async () => {
                     const planned = await nextPlan;
-                    const text = firstSpeech(planned);
+                    const text = firstSpeech(planned, nextRole);
                     const nextPrepared = text ? await prepareSpeech(episodeId, nextRole, text) : null;
                     return { kind: 'turn', planned, text, prepared: nextPrepared };
                   })()

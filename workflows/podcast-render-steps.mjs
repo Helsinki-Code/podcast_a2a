@@ -45,9 +45,9 @@ export async function renderPodcastTimeline(episodeId) {
   const item = await episode(episodeId);
   if (!item) throw new Error('Podcast not found.');
   await setEpisodeFields(episodeId, { videoStatus: 'processing', videoError: null });
-  const sourceTimeline = podcastTimeline(item.events || [], { gap: .14 });
+  const sourceTimeline = podcastTimeline(item.events || [], { gap: 0 });
   const speechCount = sourceTimeline.filter(entry => entry.type === 'speech').length;
-  const browserCount = sourceTimeline.filter(entry => entry.type === 'browser').length;
+  const browserCount = sourceTimeline.filter(entry => entry.video).length;
   if (speechCount < 2) throw new Error('The podcast has too little completed speech to render.');
   if (item.settings?.requireGuestDemo && browserCount < 1) throw new Error('The required guest Computer Use demonstration is missing from the podcast timeline.');
   const browser = new VercelEpisodeSandbox(`render-${episodeId}`, () => {});
@@ -61,31 +61,29 @@ export async function renderPodcastTimeline(episodeId) {
     for (let index = 0; index < sourceTimeline.length; index++) {
       const entry = sourceTimeline[index];
       if (entry.type === 'speech') {
-        const [audioBytes, screenBytes] = await Promise.all([readAssetBytes(entry.audio), optionalAsset(entry.screen)]);
+        const [audioBytes, screenBytes, actionBytes] = await Promise.all([readAssetBytes(entry.audio), optionalAsset(entry.screen), optionalAsset(entry.video)]);
         const audioPath = `/tmp/podcast-speech-${index}.mp3`;
+        const trimmedAudioPath = `/tmp/podcast-speech-${index}.wav`;
         const stagePath = `/tmp/podcast-stage-${index}.png`;
         const segmentPath = `/tmp/podcast-part-${index}.mp4`;
         await browser.writeSandboxFile(audioPath, audioBytes);
-        const audioDuration = await probeDuration(browser, audioPath);
+        let result = await browser.run('ffmpeg', ['-y', '-i', audioPath, '-af', 'silenceremove=start_periods=1:start_duration=0.03:start_threshold=-42dB:start_silence=0.01,areverse,silenceremove=start_periods=1:start_duration=0.03:start_threshold=-42dB:start_silence=0.02,areverse', '-ar', '48000', '-ac', '2', trimmedAudioPath], 120000);
+        if (result.exitCode) throw new Error(`Could not remove speech boundary silence ${index + 1}: ${(await result.stderr()).slice(-1200)}`);
+        const audioDuration = await probeDuration(browser, trimmedAudioPath);
         const duration = audioDuration + entry.gap;
         await renderStage(browser, stagePath, stageHtml(item, entry, hostImage, guestImage, imageData(screenBytes, entry.screen)));
-        const result = await browser.run('ffmpeg', ['-y', '-loop', '1', '-framerate', '30', '-i', stagePath, '-i', audioPath, '-t', String(duration), '-vf', 'scale=1920:1080,fps=30,format=yuv420p', '-af', `apad=pad_dur=${entry.gap}`, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', segmentPath], 10 * 60 * 1000);
+        if (actionBytes?.length) {
+          const actionPath = `/tmp/podcast-action-${index}.mp4`;
+          await browser.writeSandboxFile(actionPath, actionBytes);
+          const actionDuration = await probeDuration(browser, actionPath);
+          const speed = duration / actionDuration;
+          result = await browser.run('ffmpeg', ['-y', '-loop', '1', '-framerate', '30', '-i', stagePath, '-i', actionPath, '-i', trimmedAudioPath, '-t', String(duration), '-filter_complex', `[0:v]scale=1920:1080,fps=30,format=yuv420p[stage];[1:v]setpts=${speed.toFixed(6)}*PTS,scale=1060:644:force_original_aspect_ratio=decrease,pad=1060:644:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,format=yuv420p[action];[stage][action]overlay=772:213:shortest=1[outv]`, '-map', '[outv]', '-map', '2:a:0', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-shortest', '-movflags', '+faststart', segmentPath], 10 * 60 * 1000);
+        } else {
+          result = await browser.run('ffmpeg', ['-y', '-loop', '1', '-framerate', '30', '-i', stagePath, '-i', trimmedAudioPath, '-t', String(duration), '-vf', 'scale=1920:1080,fps=30,format=yuv420p', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-shortest', '-movflags', '+faststart', segmentPath], 10 * 60 * 1000);
+        }
         if (result.exitCode) throw new Error(`Could not render podcast speech ${index + 1}: ${(await result.stderr()).slice(-1200)}`);
         parts.push(segmentPath);
         timed.push({ ...entry, start: cursor, duration, audioDuration });
-        cursor += duration;
-      } else {
-        const videoBytes = await readAssetBytes(entry.video);
-        const inputPath = `/tmp/podcast-browser-${index}.mp4`;
-        const segmentPath = `/tmp/podcast-part-${index}.mp4`;
-        await browser.writeSandboxFile(inputPath, videoBytes);
-        const inputDuration = await probeDuration(browser, inputPath);
-        const duration = Math.min(1.35, Math.max(.7, inputDuration));
-        const speed = duration / inputDuration;
-        const result = await browser.run('ffmpeg', ['-y', '-fflags', '+genpts', '-i', inputPath, '-f', 'lavfi', '-t', String(duration), '-i', 'anullsrc=r=48000:cl=stereo', '-t', String(duration), '-vf', `setpts=${speed.toFixed(6)}*PTS,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,format=yuv420p`, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-shortest', '-movflags', '+faststart', segmentPath], 10 * 60 * 1000);
-        if (result.exitCode) throw new Error(`Could not normalize podcast browser action ${index + 1}: ${(await result.stderr()).slice(-1200)}`);
-        parts.push(segmentPath);
-        timed.push({ ...entry, start: cursor, duration });
         cursor += duration;
       }
     }
@@ -97,7 +95,7 @@ export async function renderPodcastTimeline(episodeId) {
     result = await browser.run('ffmpeg', finalArgs, 20 * 60 * 1000);
     if (result.exitCode) throw new Error(`Could not burn podcast captions: ${(await result.stderr()).slice(-1200)}`);
     const quality = await inspectSandboxMedia(browser, '/tmp/podcast-final.mp4', { sceneThreshold: 0.008, silenceNoise: '-30dB', silenceDuration: .25 });
-    const verdict = evaluateMediaQuality(quality, { interactive: Boolean(item.settings?.requireGuestDemo), minDuration: 4, maxSilencePercent: 35, maxSilenceSeconds: 2 });
+    const verdict = evaluateMediaQuality(quality, { interactive: Boolean(item.settings?.requireGuestDemo), minDuration: 4, maxSilencePercent: 15, maxSilenceSeconds: 1 });
     if (!verdict.passed) throw new Error(`Podcast quality check failed: ${verdict.failures.join(' ')}`);
     const [video, captions] = await Promise.all([browser.readSandboxFile('/tmp/podcast-final.mp4'), browser.readSandboxFile('/tmp/podcast.srt')]);
     const [mp4, captionUrl] = await Promise.all([putNamedAsset(`episode-${safe(episodeId)}.mp4`, video), putNamedAsset(`episode-${safe(episodeId)}.srt`, captions)]);

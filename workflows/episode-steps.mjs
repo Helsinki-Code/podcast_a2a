@@ -2,7 +2,7 @@ import { episode, appendEpisodeEvent, setEpisodeFields, stamp, uid, putNamedAsse
 import { modelProviders, speechProviders, supportedVoice } from '../lib/providers.mjs';
 import { ownContext } from '../lib/conversation.mjs';
 import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';
-import { episodePlanHasContent } from '../lib/episode-plan.mjs';
+import { episodePlanHasContent, episodePlanQualityIssue } from '../lib/episode-plan.mjs';
 
 async function emit(episodeId, type, payload = {}, turn = null, eventId = uid()) {
   const event = { id: eventId, at: stamp(), type, ...payload };
@@ -45,6 +45,8 @@ export async function plan(episodeId, role, screen, mode, extra = '') {
     result = await provider.generateVisual(messages, capture.image, visualModel, { ...routing, output: 'podcast' });
   } else result = await provider.generate(messages, selectedModel, routing);
   if (!episodePlanHasContent(result, mode)) throw new Error(`${role} model returned no ${mode === 'interrupt' ? 'interruption verdict' : 'speech or action'}.`);
+  const qualityIssue = episodePlanQualityIssue(result, { role, mode });
+  if (qualityIssue) throw new Error(`${role} ${qualityIssue}. Regenerate a complete, direct response to the preceding exchange.`);
   return result;
 }
 export async function interjectionVerdict(episodeId, otherRole, currentRole, phrase, screen) {

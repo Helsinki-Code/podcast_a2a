@@ -1,7 +1,7 @@
 import '../lib/env.mjs';
 import { modelProviders } from '../lib/providers.mjs';
 import { ownContext } from '../lib/conversation.mjs';
-import { episodePlanHasContent } from '../lib/episode-plan.mjs';
+import { episodePlanHasContent, episodePlanQualityIssue } from '../lib/episode-plan.mjs';
 import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';
 
 const id = `podcast-gateway-plan-${Date.now()}`;
@@ -30,7 +30,10 @@ try {
     { output: 'podcast', user: id, tags: ['feature:podcast-visual-contract-check'] }
   );
   if (!episodePlanHasContent(result)) throw new Error(`Visual podcast plan used the wrong shape: ${JSON.stringify(result).slice(0, 1200)}`);
-  console.log(JSON.stringify({ verified: true, segmentTypes: result.segments.map(segment => segment.type), hasSpeech: result.segments.some(segment => segment.type === 'speak'), hasAction: result.segments.some(segment => segment.type === 'act') }, null, 2));
+  const qualityIssue = episodePlanQualityIssue(result, { role: 'guest', mode: 'turn' });
+  if (qualityIssue) throw new Error(`Visual guest plan failed the answer quality gate: ${qualityIssue}`);
+  const guestWords = result.segments.filter(segment => segment.type === 'speak').flatMap(segment => String(segment.text || '').split(/\s+/).filter(Boolean)).length;
+  console.log(JSON.stringify({ verified: true, segmentTypes: result.segments.map(segment => segment.type), hasSpeech: result.segments.some(segment => segment.type === 'speak'), hasAction: result.segments.some(segment => segment.type === 'act'), guestWords }, null, 2));
 } finally {
   await browser.close().catch(() => {});
 }

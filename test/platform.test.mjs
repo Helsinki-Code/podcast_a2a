@@ -13,13 +13,13 @@ const providers = await import('../lib/providers.mjs');
 const { runEpisode } = await import('../lib/engine.mjs');
 const { retrieve, buildIndex } = await import('../lib/rag.mjs');
 const { startSpeech, openLiveAudio } = await import('../lib/audio.mjs');
-const { demoLeadInComplete, ownContext, speechPhrases } = await import('../lib/conversation.mjs');
+const { demoLeadInComplete, ownContext, speechBlocks, speechPhrases } = await import('../lib/conversation.mjs');
 const { buildCaptions, captionChunks, explainerCaptionFilter, explainerSceneBudget, requiredActionKinds, actionFingerprint, actionIsCompatible, buildExplainerDirectorState } = await import('../workflows/explainer-steps.mjs');
 const { isSandboxNameConflict } = await import('../lib/vercel-sandbox.mjs');
 const { parseProbeJson, parseSilenceLog, evaluateMediaQuality } = await import('../lib/media-quality.mjs');
 const { podcastTimeline, podcastCaptions } = await import('../lib/podcast-timeline.mjs');
 const { environmentReport } = await import('../lib/environment.mjs');
-const { episodePlanHasContent } = await import('../lib/episode-plan.mjs');
+const { episodePlanHasContent, episodePlanQualityIssue } = await import('../lib/episode-plan.mjs');
 const { assertPublicHttpUrl, isPrivateAddress } = await import('../lib/url-security.mjs');
 await store.initStore();
 
@@ -86,6 +86,8 @@ test('subtitle styles are user selectable and podcast speech stays conversationa
   const phrases = speechPhrases('This deliberately long sentence contains enough words to require several compact spoken phrases so the next voice can be prepared while the current phrase is still playing for the audience.');
   assert.ok(phrases.length >= 2);
   assert.ok(phrases.every(phrase => phrase.split(/\s+/).length <= 24));
+  const blocks = speechBlocks('The guest answers the host directly with enough concrete detail to explain the product clearly. The same answer continues naturally without creating a separate audio file for every sentence. This reduces playback seams while keeping the response coherent and specific for the listener.', 72);
+  assert.equal(blocks.length, 1);
 });
 
 test('explainer action history has stable fingerprints that prevent repeated scenes', () => {
@@ -160,8 +162,9 @@ test('podcast timeline excludes generation waits and includes browser action med
     { type: 'speech', at: '2026-01-01T00:03:30Z', role: 'host', text: 'The dashboard is visible now.', audio: '/api/audio/c' }
   ];
   const timeline = podcastTimeline(events);
-  assert.deepEqual(timeline.map(item => item.type), ['speech', 'speech', 'browser', 'speech']);
-  assert.equal(timeline[3].screen, '/assets/screen.png');
+  assert.deepEqual(timeline.map(item => item.type), ['speech', 'speech', 'speech']);
+  assert.equal(timeline[2].screen, '/assets/screen.png');
+  assert.equal(timeline[2].video, '/assets/action.mp4');
   assert.equal(timeline.some(item => item.type === 'thinking'), false);
   const captions = podcastCaptions([{ ...timeline[0], start: 0, audioDuration: 2 }, { ...timeline[1], start: 2.14, audioDuration: 2.5 }]);
   assert.match(captions, /HOST: Welcome to the show/);
@@ -202,6 +205,13 @@ test('podcast visual plans must contain usable speech or actions', () => {
   assert.equal(episodePlanHasContent({ segments: [{ type: 'speak', text: 'I can see the dashboard now.' }] }), true);
   assert.equal(episodePlanHasContent({ segments: [{ type: 'act', tool: 'browser', input: { action: 'scroll' } }] }), true);
   assert.equal(episodePlanHasContent({ interrupt: false }, 'interrupt'), true);
+});
+
+test('podcast guest plans reject fragments and require substantive answers', () => {
+  assert.match(episodePlanQualityIssue({ segments: [{ type: 'speak', text: 'Yes.' }] }, { role: 'guest', mode: 'turn' }), /short guest fragment/);
+  assert.match(episodePlanQualityIssue({ segments: [{ type: 'speak', text: 'It helps teams automate outreach.' }] }, { role: 'guest', mode: 'turn' }), /too short/);
+  const answer = 'The campaign workspace starts by taking a target company URL and a lead count. It then researches that company, finds relevant people, drafts tailored sequences, and keeps every result in a review queue before anything is sent. That gives the operator control while removing the repetitive research and writing work.';
+  assert.equal(episodePlanQualityIssue({ segments: [{ type: 'speak', text: answer }] }, { role: 'guest', mode: 'turn' }), '');
 });
 
 test('restart copies production inputs into a clean attempt without reusing outputs or charges', async () => {
@@ -267,7 +277,7 @@ test('episode alternates, keeps private outline out of guest context, and stores
       }
       assert.ok(system.includes('You are the guest'));
       assert.ok(!system.includes('SECRET HOST ANGLE'));
-      return { segments: [{ type: 'speak', text: 'Yes. A panel converts sunlight into electrical current.' }], finish: false };
+      return { segments: [{ type: 'speak', text: 'A photovoltaic panel converts sunlight directly into electrical current through semiconductor cells. The diagram shows that energy moving from the sun into the panel, where the cells create direct current. An inverter can then convert it into alternating current for household equipment or the electrical grid.' }], finish: false };
     }
   });
   providers.registerSpeech('test-speech', { async synthesize(text) { return Buffer.from(`fake mp3 ${text}`); } });
