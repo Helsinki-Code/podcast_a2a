@@ -1,7 +1,7 @@
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const esc = text => String(text ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = { personas: [], episodes: [], explainers: [], config: null, account: null, clerk: null, current: null, eventSource: null, pollTimer: null, explainerPoll: null, recorder: null, recorderChunks: [], audioContext: null, audioElement: null, sandboxAudioElement: null, sandboxPlaying: false, pendingSandboxAudio: null, audioUnlock: null, analyser: null, audioDestination: null, queue: [], playing: false, screen: { type: 'idle', title: 'The stage is ready', content: '' }, speaker: null, caption: '', amplitude: 0, startTime: 0, hostImage: null, guestImage: null, screenImage: null, ended: false, seen: new Set(), credentials: new Map(), localVideoUrl: null, mediaCancels: new Map() };
+const state = { personas: [], episodes: [], explainers: [], config: null, account: null, clerk: null, current: null, eventSource: null, pollTimer: null, explainerPoll: null, recorder: null, recorderChunks: [], audioContext: null, audioElement: null, speechElements: {}, sandboxAudioElement: null, sandboxPlaying: false, pendingSandboxAudio: null, audioUnlock: null, analyser: null, audioDestination: null, queue: [], playing: false, screen: { type: 'idle', title: 'The stage is ready', content: '' }, speaker: null, caption: '', amplitude: 0, startTime: 0, hostImage: null, guestImage: null, screenImage: null, ended: false, seen: new Set(), credentials: new Map(), localVideoUrl: null, mediaCancels: new Map() };
 
 async function api(path, options = {}) {
   const token = await state.clerk?.session?.getToken().catch(() => null);
@@ -109,7 +109,7 @@ async function saveEpisode(event) {
     const [width,height] = form.elements.resolution.value.split('x').map(Number);
     const authRequired = form.elements.authRequired.checked;
     if (authRequired && (!form.elements.demoUrl.value || !form.elements.demoUsername.value || !form.elements.demoPassword.value)) throw new Error('Add the platform URL, username, and password before creating this authenticated demo.');
-    const data = { hostId: form.elements.hostId.value, guestId: form.elements.guestId.value, outline: { subject: form.elements.subject.value, angle: form.elements.angle.value, points: form.elements.points.value }, settings: { layout: form.elements.layout.value, maxMinutes: +form.elements.maxMinutes.value, width, height, outputFormat: form.elements.outputFormat.value, accent: form.elements.accent.value, guestAccent: form.elements.guestAccent.value, background: form.elements.background.value, glowStrength: +form.elements.glowStrength.value, paneWidth: +form.elements.paneWidth.value, interjections: form.elements.interjections.checked, interjectProbability: +form.elements.interjectProbability.value / 100, hostTools: form.elements.hostTools.checked, requireGuestDemo: form.elements.requireGuestDemo.checked, demo: { url: form.elements.demoUrl.value, brief: form.elements.demoBrief.value, authRequired, usernameSelector: form.elements.usernameSelector.value, passwordSelector: form.elements.passwordSelector.value, submitSelector: form.elements.submitSelector.value } } };
+    const data = { hostId: form.elements.hostId.value, guestId: form.elements.guestId.value, outline: { subject: form.elements.subject.value, angle: form.elements.angle.value, points: form.elements.points.value }, settings: { layout: form.elements.layout.value, maxMinutes: +form.elements.maxMinutes.value, width, height, outputFormat: form.elements.outputFormat.value, captionStyle: form.elements.captionStyle.value, accent: form.elements.accent.value, guestAccent: form.elements.guestAccent.value, background: form.elements.background.value, glowStrength: +form.elements.glowStrength.value, paneWidth: +form.elements.paneWidth.value, interjections: form.elements.interjections.checked, interjectProbability: +form.elements.interjectProbability.value / 100, hostTools: form.elements.hostTools.checked, requireGuestDemo: form.elements.requireGuestDemo.checked, demo: { url: form.elements.demoUrl.value, loginUrl: form.elements.demoLoginUrl.value, brief: form.elements.demoBrief.value, authRequired, usernameSelector: form.elements.usernameSelector.value, passwordSelector: form.elements.passwordSelector.value, submitSelector: form.elements.submitSelector.value } } };
     const episode = await api('/api/episodes', { method: 'POST', body: JSON.stringify(data) });
     if (authRequired) state.credentials.set(episode.id, { username: form.elements.demoUsername.value, password: form.elements.demoPassword.value });
     $('#episodeDialog').close(); await refresh(); await openStudio(episode.id);
@@ -155,7 +155,7 @@ async function pollEpisode(id) {
   } catch (cause) {
     if (!state.ended) notice(`Live update failed: ${cause.message}`);
   }
-  if (state.current?.id === id && !state.ended) state.pollTimer = setTimeout(() => pollEpisode(id), 1000);
+  if (state.current?.id === id && !state.ended) state.pollTimer = setTimeout(() => pollEpisode(id), 150);
 }
 function setStatus(status) { $('#liveStatus').textContent = status.toUpperCase(); $('#liveStatus').className = `pill ${status}`; $('#stopEpisode').classList.toggle('hidden', !['running','preparing'].includes(status)); $('#restartEpisode').classList.toggle('hidden', !['complete','stopped','failed','interrupted'].includes(status)); }
 function renderDownloads() {
@@ -163,10 +163,20 @@ function renderDownloads() {
   const transcriptUrl = URL.createObjectURL(transcript);
   const stem = e.outline.subject.replace(/[^a-z0-9]/gi,'-').replace(/-+/g,'-').replace(/^-|-$/g,'') || 'podcast';
   const video = e.mp4 || e.video || state.localVideoUrl;
-  $('#downloads').innerHTML = `${video ? `<a class="video-download" href="${esc(video)}" download="${esc(stem)}.${e.mp4 ? 'mp4' : 'webm'}">↓ Download finished video</a>` : ''}<a href="${transcriptUrl}" download="${esc(stem)}-transcript.txt">↓ Transcript</a><a href="/api/episodes/${e.id}" download="episode.json" target="_blank">Episode data ↗</a>${e.mp4 && e.video ? `<a href="${esc(e.video)}" download="${esc(stem)}.webm">↓ WebM copy</a>` : ''}`;
+  $('#downloads').innerHTML = `${video ? `<a class="video-download" href="${esc(video)}" download="${esc(stem)}.${e.mp4 ? 'mp4' : 'webm'}">↓ Download finished video</a>` : ''}${e.videoStatus==='processing'?'<span class="hint">MP4 is being prepared…</span>':''}${e.videoStatus==='failed'?`<span class="row-error">${esc(e.videoError||'MP4 conversion failed. The WebM copy is available.')}</span>`:''}<a href="${transcriptUrl}" download="${esc(stem)}-transcript.txt">↓ Transcript</a><a href="/api/episodes/${e.id}" download="episode.json" target="_blank">Episode data ↗</a>${e.mp4 && e.video ? `<a href="${esc(e.video)}" download="${esc(stem)}.webm">↓ WebM copy</a>` : ''}`;
   const player = $('#reviewPlayer');
   player.classList.toggle('hidden', !video);
   if (video && player.dataset.source !== video) { player.dataset.source = video; player.src = video; }
+}
+async function pollPodcastVideo(id) {
+  if (state.current?.id !== id) return;
+  try {
+    const fresh = await api(`/api/episodes/${id}`);
+    Object.assign(state.current, { video: fresh.video, mp4: fresh.mp4, videoStatus: fresh.videoStatus, videoError: fresh.videoError });
+    renderDownloads();
+    if (fresh.videoStatus === 'processing') setTimeout(() => pollPodcastVideo(id), 2500);
+    else if (fresh.mp4) notice('The MP4 is ready to download.', true);
+  } catch (error) { notice(`Could not check MP4 progress: ${error.message}`); }
 }
 function credentialsForCurrentEpisode() {
   if (!state.current?.settings?.demo?.authRequired) return Promise.resolve(null);
@@ -204,13 +214,17 @@ function processEvent(event, history = false) {
 }
 const SILENT_AUDIO = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 function initializeAudioGraph() {
-  if (state.audioContext && state.audioElement && state.sandboxAudioElement) return;
+  if (state.audioContext && state.speechElements.host && state.speechElements.guest && state.sandboxAudioElement) return;
   state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
   state.audioDestination = state.audioContext.createMediaStreamDestination();
   state.analyser = state.audioContext.createAnalyser(); state.analyser.fftSize = 256;
-  state.audioElement = new Audio(); state.audioElement.preload = 'auto';
-  const source = state.audioContext.createMediaElementSource(state.audioElement);
-  source.connect(state.analyser); state.analyser.connect(state.audioDestination); state.analyser.connect(state.audioContext.destination);
+  for (const role of ['host','guest']) {
+    const element = new Audio(); element.preload = 'auto'; state.speechElements[role] = element;
+    const source = state.audioContext.createMediaElementSource(element);
+    source.connect(state.analyser);
+  }
+  state.audioElement = state.speechElements.host;
+  state.analyser.connect(state.audioDestination); state.analyser.connect(state.audioContext.destination);
   state.sandboxAudioElement = new Audio(); state.sandboxAudioElement.preload = 'auto';
   state.sandboxAudioElement.onended = () => { state.sandboxPlaying = false; maybeFinish(); };
   const sandboxSource = state.audioContext.createMediaElementSource(state.sandboxAudioElement);
@@ -220,7 +234,7 @@ function unlockAudio() {
   initializeAudioGraph();
   const attempts = [];
   if (state.audioContext.state === 'suspended') attempts.push(state.audioContext.resume());
-  for (const element of [state.audioElement, state.sandboxAudioElement]) {
+  for (const element of [...Object.values(state.speechElements), state.sandboxAudioElement]) {
     element.src = SILENT_AUDIO;
     const attempt = element.play();
     attempts.push(Promise.resolve(attempt).then(() => { element.pause(); element.removeAttribute('src'); element.load(); }));
@@ -292,27 +306,48 @@ async function finishRecording() {
       const response = await fetch(`/api/episodes/${state.current.id}/video`, { method: 'PUT', headers: { 'Content-Type': 'video/webm', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: blob });
       data = await response.json(); if (!response.ok) throw new Error(data.error || 'Upload failed');
     }
-    state.current.video = data.video; if (data.mp4) state.current.mp4 = data.mp4; renderDownloads(); notice('The continuous take is ready to download.', true);
+    state.current.video = data.video; state.current.videoStatus = data.videoStatus; if (data.mp4) state.current.mp4 = data.mp4; renderDownloads();
+    if (data.videoStatus === 'processing') { notice('The WebM is saved. MP4 conversion is running.', true); pollPodcastVideo(state.current.id); }
+    else notice('The continuous take is ready to download.', true);
   } catch (error) { notice(`Cloud copy failed, but the Download finished video button still works: ${error.message}`); }
 }
 function maybeFinish() { if (state.ended && !state.playing && !state.sandboxPlaying && !state.queue.length) finishRecording(); }
+function waitForTail(element, leadSeconds = .14) {
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = () => { if (settled) return; settled = true; element.removeEventListener('timeupdate', check); element.removeEventListener('ended', finish); resolve(); };
+    const check = () => { if (Number.isFinite(element.duration) && element.duration - element.currentTime <= leadSeconds) finish(); };
+    element.addEventListener('timeupdate', check); element.addEventListener('ended', finish, { once: true }); check();
+  });
+}
+async function playSpeechEvent(event) {
+  const element = state.speechElements[event.role] || state.speechElements.host;
+  state.audioElement = element; state.speaker = event.role; state.caption = event.text;
+  const playback = playToEnd(element, event.audio);
+  try { await api(`/api/episodes/${state.current.id}/ack`, { method: 'POST', body: JSON.stringify({ eventId: event.id }) }); } catch (error) { notice(error.message); }
+  await waitForTail(element);
+  let overlap = null;
+  const next = state.queue[0];
+  if (next && next.role !== event.role && !state.ended) {
+    state.queue.shift();
+    overlap = playSpeechEvent(next);
+  }
+  await playback;
+  if (overlap) await overlap;
+  if (state.speaker === event.role) { state.speaker = null; state.caption = ''; state.amplitude = 0; }
+}
 async function playQueue() {
   if (state.playing) return; state.playing = true;
   while (state.queue.length) {
-    const event = state.queue.shift(); state.speaker = event.role; state.caption = event.text;
-    try {
-      await playToEnd(state.audioElement, event.audio);
-    } catch (error) {
-      if (state.ended && error?.name === 'AbortError') { state.playing = false; state.speaker = null; state.caption = ''; state.amplitude = 0; drawStage(); return; }
-      if (playbackBlocked(error)) {
-        state.queue.unshift(event); state.playing = false; state.speaker = null; state.caption = ''; state.amplitude = 0; showAudioGate(); drawStage(); return;
-      }
+    const event = state.queue.shift();
+    try { await playSpeechEvent(event); }
+    catch (error) {
+      if (state.ended && error?.name === 'AbortError') break;
+      if (playbackBlocked(error)) { state.queue.unshift(event); showAudioGate(); break; }
       notice(`Audio playback failed: ${error.message || error}`);
     }
-    state.speaker = null; state.caption = ''; state.amplitude = 0;
-    try { await api(`/api/episodes/${state.current.id}/ack`, { method: 'POST', body: JSON.stringify({ eventId: event.id }) }); } catch (error) { notice(error.message); }
   }
-  state.playing = false; maybeFinish();
+  state.playing = false; state.speaker = null; state.caption = ''; state.amplitude = 0; drawStage(); maybeFinish();
 }
 function stopLocalPlayback() {
   state.ended = true; state.queue = []; state.pendingSandboxAudio = null; state.playing = false; state.sandboxPlaying = false;
@@ -336,7 +371,7 @@ function loadImage(url) { return new Promise(resolve => { if (!url) return resol
 function rounded(ctx,x,y,w,h,r){ctx.beginPath();ctx.roundRect(x,y,w,h,r)}
 function wrap(ctx,text,x,y,maxWidth,lineHeight,maxLines=12){const words=String(text||'').split(/\s+/);let line='',count=0;for(const word of words){const test=line ? `${line} ${word}` : word;if(ctx.measureText(test).width>maxWidth && line){ctx.fillText(line,x,y+count*lineHeight);count++;line=word;if(count>=maxLines)break}else line=test}if(count<maxLines)ctx.fillText(line,x,y+count*lineHeight);return count+1}
 function captionLines(ctx,text,maxWidth,maxLines=3){const words=String(text||'').split(/\s+/),lines=[];let line='';for(const word of words){const next=line?`${line} ${word}`:word;if(ctx.measureText(next).width>maxWidth&&line){lines.push(line);line=word;if(lines.length===maxLines-1)break}else line=next}if(line&&lines.length<maxLines)lines.push(line);return lines}
-function drawCaption(ctx){if(!state.caption)return;ctx.save();ctx.font='600 25px Arial';ctx.textAlign='center';const lines=captionLines(ctx,state.caption,1000,3);const lineHeight=33,boxHeight=lines.length*lineHeight+30,y=650-boxHeight;ctx.fillStyle='#061013dc';rounded(ctx,110,y,1060,boxHeight,12);ctx.fill();ctx.fillStyle='#f4faf7';lines.forEach((line,index)=>ctx.fillText(line,640,y+31+index*lineHeight));ctx.restore()}
+function drawCaption(ctx){if(!state.caption)return;ctx.save();const style=state.current?.settings?.captionStyle||'studio';ctx.textAlign='center';ctx.font=style==='bold'?'800 31px Arial':style==='minimal'?'600 26px Arial':'600 25px Arial';const lines=captionLines(ctx,state.caption,style==='bold'?920:1000,2);const lineHeight=style==='bold'?39:34,boxHeight=lines.length*lineHeight+26,y=650-boxHeight;if(style==='studio'){ctx.fillStyle='#061013dc';rounded(ctx,110,y,1060,boxHeight,12);ctx.fill()}ctx.lineJoin='round';ctx.lineWidth=style==='bold'?8:style==='minimal'?5:0;ctx.strokeStyle='#061013';ctx.fillStyle=style==='bold'?'#80ded1':'#f4faf7';lines.forEach((line,index)=>{const yy=y+31+index*lineHeight;if(ctx.lineWidth)ctx.strokeText(line,640,yy);ctx.fillText(line,640,yy)});ctx.restore()}
 function drawStage() {
   const canvas=$('#stage'),ctx=canvas.getContext('2d');if(!ctx)return;const W=canvas.width,H=canvas.height,s=W/1280;ctx.save();ctx.scale(s,s);const bg=state.current?.settings.background||'#101c24',accent=state.current?.settings.accent||'#80ded1';ctx.fillStyle=bg;ctx.fillRect(0,0,1280,720);
   const gradient=ctx.createRadialGradient(640,350,10,640,350,800);gradient.addColorStop(0,'#26545044');gradient.addColorStop(1,'#00000000');ctx.fillStyle=gradient;ctx.fillRect(0,0,1280,720);
@@ -354,7 +389,7 @@ function tick(){if(state.recorder?.state!=='recording')return;if(state.analyser&
 function openExplainerDialog(item = null) {
   const form = $('#explainerForm'); form.reset(); form.dataset.explainerId = item?.id || '';
   if (item) {
-    for (const name of ['title','url','brief','voice','loginUrl','usernameSelector','passwordSelector','submitSelector']) {
+    for (const name of ['title','url','brief','voice','captionStyle','loginUrl','usernameSelector','passwordSelector','submitSelector']) {
       if (form.elements[name] && item[name] != null) form.elements[name].value = item[name];
     }
     form.elements.authRequired.checked = !!item.authRequired;
@@ -373,7 +408,7 @@ async function saveExplainerForm(event) {
     const existing = state.explainers.find(item => item.id === form.dataset.explainerId);
     const item = existing || await api('/api/explainers', { method: 'POST', body: JSON.stringify({
       title: form.elements.title.value, url: form.elements.url.value, brief: form.elements.brief.value,
-      authRequired, voice: form.elements.voice.value, loginUrl: form.elements.loginUrl.value,
+      authRequired, voice: form.elements.voice.value, captionStyle: form.elements.captionStyle.value, loginUrl: form.elements.loginUrl.value,
       usernameSelector: form.elements.usernameSelector.value, passwordSelector: form.elements.passwordSelector.value,
       submitSelector: form.elements.submitSelector.value
     }) });

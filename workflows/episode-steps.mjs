@@ -1,5 +1,5 @@
 import { episode, appendEpisodeEvent, setEpisodeFields, stamp, uid, putNamedAsset, refundCredits } from '../lib/store.mjs';
-import { modelProviders, speechProviders } from '../lib/providers.mjs';
+import { modelProviders, speechProviders, supportedVoice } from '../lib/providers.mjs';
 import { ownContext } from '../lib/conversation.mjs';
 import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';
 
@@ -43,19 +43,24 @@ export async function interjectionVerdict(episodeId, otherRole, currentRole, phr
   const provider = modelProviders.get(agent.modelProvider || 'gateway');
   return provider.generate(ownContext(item, otherRole, agent, screen, 'interrupt', `The ${currentRole} is still speaking and just said: ${phrase}`), agent.model);
 }
-export async function speak(episodeId, role, text, eventId) {
+export async function prepareSpeech(episodeId, role, text) {
   'use step';
   const item = await episode(episodeId);
   const agent = item.personas[role];
-  const provider = speechProviders.get(agent.speechProvider || 'gateway');
+  const providerName = agent.speechProvider || 'gateway';
+  const provider = speechProviders.get(providerName);
   if (!provider) throw new Error(`Speech provider unavailable: ${agent.speechProvider}`);
-  const speech = await provider.synthesize(text, agent.voice);
+  const speech = await provider.synthesize(text, supportedVoice(providerName, agent.voice, role === 'host' ? 'coral' : 'nova'));
   const chunks = [];
   for await (const chunk of Buffer.isBuffer(speech) || speech instanceof Uint8Array ? [speech] : speech) chunks.push(Buffer.from(chunk));
   const audioId = uid();
   await putNamedAsset(`${audioId}.mp3`, Buffer.concat(chunks));
+  return { audio: `/api/audio/${audioId}` };
+}
+export async function publishSpeech(episodeId, role, text, eventId, prepared) {
+  'use step';
   const turn = { id: uid(), at: stamp(), role, text };
-  return emit(episodeId, 'speech', { role, text, audio: `/api/audio/${audioId}`, turnId: turn.id }, turn, eventId);
+  return emit(episodeId, 'speech', { role, text, audio: prepared.audio, turnId: turn.id }, turn, eventId);
 }
 export async function prepareDemo(episodeId, demo, prepared = false) {
   'use step';

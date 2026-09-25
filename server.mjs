@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { initStore, listPersonas, listEpisodes, persona, episode, addPersona, updatePersona, deletePersona, addEpisode, putAsset, save, setEpisodeFields, acknowledgeEpisodeSpeech, assets, usesRemoteAssets, uid, stamp, account, reserveCredits, listExplainers, explainer, saveExplainer, setExplainerFields, assetOwnedBy, copyEpisodeForRestart, copyExplainerForRestart } from './lib/store.mjs';
 import { authenticate, primaryEmail } from './lib/auth.mjs';
 import { costs, createCheckout, createPortal, isPaid, processStripeWebhook, publicPlans } from './lib/billing.mjs';
-import { availableProviders } from './lib/providers.mjs';
+import { availableProviders, supportedVoice } from './lib/providers.mjs';
 import { runEpisode, stopEpisode } from './lib/engine.mjs';
 import { openLiveAudio } from './lib/audio.mjs';
 import { buildIndex } from './lib/rag.mjs';
@@ -208,6 +208,8 @@ export async function handler(req, res) {
       const demoUrl = String(input.settings?.demo?.url || '').trim().slice(0, 1000);
       if (demoUrl && !/^https?:\/\//i.test(demoUrl)) throw new Error('The demo URL must begin with http:// or https://.');
       const authRequired = !!input.settings?.demo?.authRequired;
+      const demoLoginUrl = String(input.settings?.demo?.loginUrl || '').trim().slice(0, 1000);
+      if (demoLoginUrl && !/^https?:\/\//i.test(demoLoginUrl)) throw new Error('The demo login URL must begin with http:// or https://.');
       const item = {
         id: uid(), ownerId: auth.userId, createdAt: stamp(), status: 'draft', hostId: input.hostId, guestId: input.guestId,
         personas: { host: structuredClone(hostPersona), guest: structuredClone(guestPersona) },
@@ -219,16 +221,18 @@ export async function handler(req, res) {
           requireGuestDemo: input.settings?.requireGuestDemo !== false,
           demo: {
             url: demoUrl,
+            loginUrl: demoLoginUrl,
             brief: String(input.settings?.demo?.brief || '').trim().slice(0, 1500),
             authRequired,
-            usernameSelector: String(input.settings?.demo?.usernameSelector || 'input[type="email"], input[name="email"], input[name="username"]').slice(0, 300),
-            passwordSelector: String(input.settings?.demo?.passwordSelector || 'input[type="password"]').slice(0, 300),
-            submitSelector: String(input.settings?.demo?.submitSelector || 'button[type="submit"], input[type="submit"]').slice(0, 300)
+            usernameSelector: String(input.settings?.demo?.usernameSelector || 'input[type="email"], input[autocomplete="username"], input[autocomplete="email"], input[name*="email" i], input[name*="user" i], input[id*="email" i], input[id*="user" i]').slice(0, 600),
+            passwordSelector: String(input.settings?.demo?.passwordSelector || 'input[type="password"], input[autocomplete="current-password"]').slice(0, 400),
+            submitSelector: String(input.settings?.demo?.submitSelector || 'button[type="submit"], input[type="submit"], button[name*="login" i], button[name*="sign" i]').slice(0, 400)
           },
           maxMinutes: Math.max(1, Math.min(180, Number(input.settings?.maxMinutes) || 30)),
           width: fullHD ? 1920 : 1280,
           height: fullHD ? 1080 : 720,
           outputFormat: ['both','mp4','webm'].includes(input.settings?.outputFormat) ? input.settings.outputFormat : 'both',
+          captionStyle: ['studio','minimal','bold'].includes(input.settings?.captionStyle) ? input.settings.captionStyle : 'studio',
           accent: validColor(input.settings?.accent, '#80ded1'),
           guestAccent: validColor(input.settings?.guestAccent, '#efbe9e'),
           background: validColor(input.settings?.background, '#101c24'),
@@ -316,8 +320,14 @@ export async function handler(req, res) {
         const blob = await head(pathname);
         if (!blob || blob.pathname !== pathname) return error(res, 404, 'Video upload not found.');
         item.video = `/assets/${filename}`;
+        item.videoStatus = item.settings.outputFormat === 'webm' ? 'complete' : 'processing';
         await save(item);
-        return json(res, 200, { video: item.video, mp4: null });
+        if (item.settings.outputFormat !== 'webm') {
+          const [{ start }, { podcastVideoWorkflow }] = await Promise.all([import('workflow/api'), import('./workflows/podcast-video.mjs')]);
+          const run = await start(podcastVideoWorkflow, [item.id, pathname]);
+          await setEpisodeFields(item.id, { videoWorkflowRunId: run.runId });
+        }
+        return json(res, 200, { video: item.video, mp4: null, videoStatus: item.videoStatus });
       }
       if (parts[3] === 'video' && req.method === 'PUT') {
         if (usesRemoteAssets()) return error(res, 409, 'Use direct Blob upload for videos.');
@@ -350,7 +360,8 @@ export async function handler(req, res) {
         usernameSelector: String(input.usernameSelector || 'input[type="email"], input[autocomplete="username"], input[autocomplete="email"], input[name*="email" i], input[name*="user" i], input[id*="email" i], input[id*="user" i]').slice(0, 600),
         passwordSelector: String(input.passwordSelector || 'input[type="password"], input[autocomplete="current-password"]').slice(0, 400),
         submitSelector: String(input.submitSelector || 'button[type="submit"], input[type="submit"], button[name*="login" i], button[name*="sign" i]').slice(0, 400),
-        speechProvider: String(input.speechProvider || 'gateway').slice(0, 40), voice: String(input.voice || 'marin').slice(0, 100)
+        speechProvider: 'gateway', voice: supportedVoice('gateway', String(input.voice || ''), 'coral'),
+        captionStyle: ['studio','minimal','editorial','bold'].includes(input.captionStyle) ? input.captionStyle : 'studio'
       };
       await saveExplainer(item); return json(res, 201, item);
     }

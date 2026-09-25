@@ -1,4 +1,4 @@
-import { beginExplainer, planScene, renderScene, finishExplainer, failExplainer } from './explainer-steps.mjs';
+import { beginExplainer, explainerSceneBudget, planScene, renderScene, finishExplainer, failExplainer } from './explainer-steps.mjs';
 
 export async function explainerWorkflow(explainerId) {
   'use workflow';
@@ -6,8 +6,11 @@ export async function explainerWorkflow(explainerId) {
     let screen = await beginExplainer(explainerId);
     const timeline = [];
     const completed = [];
-    for (let index = 0; index < 8; index++) {
-      const decision = await planScene(explainerId, screen, completed, index);
+    const sceneBudget = await explainerSceneBudget(explainerId);
+    let index = 0;
+    let done = false;
+    while (!done && index < sceneBudget) {
+      const decision = await planScene(explainerId, screen, completed, index, index === sceneBudget - 1);
       const narration = String(decision.narration || '').trim();
       if (!narration) {
         if (decision.done) break;
@@ -17,7 +20,8 @@ export async function explainerWorkflow(explainerId) {
       timeline.push({ text: narration, duration: result.duration, video: result.video, audio: result.audio });
       completed.push(narration);
       screen = result.screen;
-      if (decision.done) break;
+      done = decision.done === true;
+      index++;
     }
     if (!timeline.length) throw new Error('The explainer agent produced no scenes.');
     await finishExplainer(explainerId, timeline);

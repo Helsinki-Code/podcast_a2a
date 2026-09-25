@@ -13,13 +13,48 @@ const providers = await import('../lib/providers.mjs');
 const { runEpisode } = await import('../lib/engine.mjs');
 const { retrieve, buildIndex } = await import('../lib/rag.mjs');
 const { startSpeech, openLiveAudio } = await import('../lib/audio.mjs');
-const { demoLeadInComplete, ownContext } = await import('../lib/conversation.mjs');
+const { demoLeadInComplete, ownContext, speechPhrases } = await import('../lib/conversation.mjs');
+const { buildCaptions, captionChunks, explainerCaptionFilter, explainerSceneBudget } = await import('../workflows/explainer-steps.mjs');
 await store.initStore();
 
 test('retrieval returns only relevant source chunks', () => {
   const files = [{ name: 'solar.txt', text: 'Photovoltaic panels turn sunlight into electricity. Solar cells are installed on roofs.' }, { name: 'baking.txt', text: 'Bread needs flour and water.' }];
   const index = buildIndex(files);
   assert.equal(retrieve(index, 'How do solar panels work?')[0].source, 'solar.txt');
+});
+
+test('AI Gateway explainer voices reject legacy selections before generation', () => {
+  assert.equal(providers.supportedVoice('gateway', 'coral', 'coral'), 'coral');
+  assert.equal(providers.supportedVoice('gateway', 'marin', 'coral'), 'coral');
+  assert.equal(providers.supportedVoice('gateway', 'cedar', 'coral'), 'coral');
+  assert.equal(providers.supportedVoice('gateway', 'ballad', 'coral'), 'coral');
+});
+
+test('explainer captions use short timed cues instead of narration paragraphs', () => {
+  const text = 'Create a campaign by entering the company website, choosing the lead count, selecting a target region, and reviewing the settings before continuing.';
+  const chunks = captionChunks(text);
+  assert.ok(chunks.length >= 3);
+  assert.ok(chunks.every(chunk => chunk.split(/\s+/).length <= 7 && chunk.length <= 52));
+  const captions = buildCaptions([{ text, duration: 12 }]);
+  assert.match(captions, /00:00:00,000 -->/);
+  assert.match(captions, /--> 00:00:12,000/);
+  assert.equal((captions.match(/-->/g) || []).length, chunks.length);
+});
+
+test('subtitle styles are user selectable and podcast speech stays conversational', () => {
+  assert.match(explainerCaptionFilter('minimal'), /BorderStyle=1/);
+  assert.match(explainerCaptionFilter('editorial'), /DejaVu Serif/);
+  assert.match(explainerCaptionFilter('bold'), /Bold=1/);
+  const phrases = speechPhrases('This deliberately long sentence contains enough words to require several compact spoken phrases so the next voice can be prepared while the current phrase is still playing for the audience.');
+  assert.ok(phrases.length >= 2);
+  assert.ok(phrases.every(phrase => phrase.split(/\s+/).length <= 24));
+});
+
+test('explainer scene budget follows the requested brief instead of a fixed scene count', async () => {
+  const short = { id: store.uid(), ownerId: 'owner', createdAt: store.stamp(), status: 'draft', url: 'https://example.com', title: 'Short', brief: 'Show the dashboard and explain the visible summary cards.' };
+  const detailed = { ...short, id: store.uid(), title: 'Detailed', brief: '- Open the dashboard\n- Review the pipeline\n- Open one account\n- Explain its activity\n- Return to the dashboard\n- Show reports' };
+  await store.saveExplainer(short); await store.saveExplainer(detailed);
+  assert.notEqual(await explainerSceneBudget(short.id), await explainerSceneBudget(detailed.id));
 });
 
 test('guest context requires a real browser demo without exposing login secrets', () => {

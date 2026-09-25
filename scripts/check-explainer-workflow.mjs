@@ -1,6 +1,7 @@
 import '../lib/env.mjs';
+import { writeFile } from 'node:fs/promises';
 import { neon } from '@neondatabase/serverless';
-import { del, head } from '@vercel/blob';
+import { del, get, head } from '@vercel/blob';
 import { uid, stamp, initStore, saveExplainer, explainer } from '../lib/store.mjs';
 import { explainerWorkflow } from '../workflows/explainer.mjs';
 
@@ -16,7 +17,10 @@ try {
   if (final.status !== 'complete' || !final.video || !final.captions || !final.transcript?.length) throw new Error(`Explainer workflow ended as ${final.status}: ${final.error || 'missing output'}`);
   const [video, captions] = await Promise.all([head(`assets/${final.video.split('/').pop()}`), head(`assets/${final.captions.split('/').pop()}`)]);
   if (video.size < 10_000 || captions.size < 20) throw new Error('Rendered explainer assets are unexpectedly small.');
-  console.log(`explainer workflow verified: ${final.transcript.length} scene(s), ${video.size} byte MP4, ${captions.size} byte captions`);
+  const [videoFile, captionFile] = await Promise.all([get(`assets/${final.video.split('/').pop()}`, { access: 'private' }), get(`assets/${final.captions.split('/').pop()}`, { access: 'private' })]);
+  const [videoBytes, captionBytes] = await Promise.all([new Response(videoFile.stream).arrayBuffer(), new Response(captionFile.stream).arrayBuffer()]);
+  await Promise.all([writeFile('/tmp/sales-forge-workflow-check.mp4', Buffer.from(videoBytes)), writeFile('/tmp/sales-forge-workflow-check.srt', Buffer.from(captionBytes))]);
+  console.log(`explainer workflow verified: ${final.transcript.length} scene(s), ${video.size} byte MP4, ${captions.size} byte captions · /tmp/sales-forge-workflow-check.mp4`);
 } finally {
   await sql`DELETE FROM platform_explainers WHERE id = ${id}`.catch(() => {});
   const urls = [final?.video, final?.captions].filter(Boolean).map(value => `assets/${value.split('/').pop()}`);

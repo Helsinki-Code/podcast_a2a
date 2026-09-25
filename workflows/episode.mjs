@@ -1,9 +1,18 @@
 import { defineHook, sleep } from 'workflow';
 import { demoLeadInComplete, speechPhrases } from '../lib/conversation.mjs';
-import { begin, snapshot, plan, speak, act, finish, emitInterruption, emitNotice, interjectionVerdict, expired, newEventId } from './episode-steps.mjs';
+import { begin, snapshot, plan, prepareSpeech, publishSpeech, act, finish, emitInterruption, emitNotice, interjectionVerdict, expired, newEventId } from './episode-steps.mjs';
 
 export const playbackHook = defineHook();
 export const playbackToken = (episodeId, eventId) => `podcast:${episodeId}:${eventId}`;
+
+function firstSpeech(response) {
+  for (const segment of Array.isArray(response?.segments) ? response.segments : []) {
+    if (segment.type !== 'speak') continue;
+    const phrase = speechPhrases(String(segment.text || '').trim().slice(0, 3500))[0];
+    if (phrase) return phrase;
+  }
+  return '';
+}
 
 export async function episodeWorkflow(episodeId, launch = {}) {
   'use workflow';
@@ -14,6 +23,7 @@ export async function episodeWorkflow(episodeId, launch = {}) {
     let actionsThisTurn = 0;
     let prefetched = null;
     let prefetchedRole = null;
+    let prefetchedSpeech = null;
     while (!await expired(episodeId)) {
       const item = await snapshot(episodeId);
       if (item.stopRequested) break;
@@ -33,22 +43,42 @@ export async function episodeWorkflow(episodeId, launch = {}) {
         if ((await snapshot(episodeId)).stopRequested) break;
         if (segment.type === 'speak') {
           const phrases = speechPhrases(String(segment.text || '').trim().slice(0, 3500));
+          let preparedPhrase = prefetchedSpeech?.role === role && prefetchedSpeech.text === phrases[0] ? prefetchedSpeech.prepared : null;
+          prefetchedSpeech = null;
           for (let index = 0; index < phrases.length; index++) {
             const phrase = phrases[index];
             if (!phrase) continue;
+            const prepared = preparedPhrase || await prepareSpeech(episodeId, role, phrase);
+            preparedPhrase = null;
             const eventId = await newEventId();
             const hook = playbackHook.create({ token: playbackToken(episodeId, eventId) });
             const conflict = await hook.getConflict();
             if (conflict) throw new Error(`Playback hook is already owned by run ${conflict.runId}.`);
-            await speak(episodeId, role, phrase, eventId);
+            await publishSpeech(episodeId, role, phrase, eventId, prepared);
             const isLastPhrase = index === phrases.length - 1 && segment === segments.at(-1);
             const nextRole = role === 'host' ? 'guest' : 'host';
             const nextPlan = isLastPhrase && !(role === 'host' && response.finish === true) ? plan(episodeId, nextRole, screen, 'turn') : null;
+            const nextPhrase = phrases[index + 1] || '';
+            const preparation = nextPhrase
+              ? prepareSpeech(episodeId, role, nextPhrase).then(value => ({ kind: 'phrase', value }))
+              : nextPlan
+                ? (async () => {
+                    const planned = await nextPlan;
+                    const text = firstSpeech(planned);
+                    const nextPrepared = text ? await prepareSpeech(episodeId, nextRole, text) : null;
+                    return { kind: 'turn', planned, text, prepared: nextPrepared };
+                  })()
+                : null;
             const playbackWait = Promise.race([hook, sleep('5m').then(() => ({ timeout: true }))]);
-            const [playback, planned] = nextPlan ? await Promise.all([playbackWait, nextPlan]) : [await playbackWait, null];
+            const [playback, preparedNext] = preparation ? await Promise.all([playbackWait, preparation]) : [await playbackWait, null];
             hook.dispose();
             if (playback?.timeout) throw new Error('Playback client did not acknowledge speech within five minutes.');
-            if (planned) { prefetched = planned; prefetchedRole = nextRole; }
+            if (preparedNext?.kind === 'phrase') preparedPhrase = preparedNext.value;
+            if (preparedNext?.kind === 'turn') {
+              prefetched = preparedNext.planned;
+              prefetchedRole = nextRole;
+              if (preparedNext.prepared) prefetchedSpeech = { role: nextRole, text: preparedNext.text, prepared: preparedNext.prepared };
+            }
             const current = await snapshot(episodeId);
             if (current.stopRequested) break;
             if (current.settings.interjections && (index < phrases.length - 1 || segment !== segments.at(-1))) {
