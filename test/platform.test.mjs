@@ -15,12 +15,19 @@ const { retrieve, buildIndex } = await import('../lib/rag.mjs');
 const { startSpeech, openLiveAudio } = await import('../lib/audio.mjs');
 const { demoLeadInComplete, ownContext, speechPhrases } = await import('../lib/conversation.mjs');
 const { buildCaptions, captionChunks, explainerCaptionFilter, explainerSceneBudget } = await import('../workflows/explainer-steps.mjs');
+const { isSandboxNameConflict } = await import('../lib/vercel-sandbox.mjs');
 await store.initStore();
 
 test('retrieval returns only relevant source chunks', () => {
   const files = [{ name: 'solar.txt', text: 'Photovoltaic panels turn sunlight into electricity. Solar cells are installed on roofs.' }, { name: 'baking.txt', text: 'Bread needs flour and water.' }];
   const index = buildIndex(files);
   assert.equal(retrieve(index, 'How do solar panels work?')[0].source, 'solar.txt');
+});
+
+test('sandbox name conflicts are recognized for safe resume', () => {
+  assert.equal(isSandboxNameConflict({ statusCode: 400, message: "A sandbox with the name 'podcast-id' already exists for this project." }), true);
+  assert.equal(isSandboxNameConflict(new Error("Status code 400 is not ok: A sandbox with the name 'podcast-id' already exists for this project.")), true);
+  assert.equal(isSandboxNameConflict({ statusCode: 500, message: 'Sandbox creation failed.' }), false);
 });
 
 test('AI Gateway explainer voices reject legacy selections before generation', () => {
