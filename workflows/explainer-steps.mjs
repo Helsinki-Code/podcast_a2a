@@ -4,14 +4,30 @@ import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';
 
 const safeName = value => String(value).replace(/[^a-zA-Z0-9._-]/g, '_');
 const srtText = text => String(text).replace(/\r?\n/g, ' ').replace(/<[^>]+>/g, '');
-export function explainerCaptionFilter(style = 'studio', subtitlePath = '/tmp/captions.srt') {
+const validHex = (value, fallback) => /^#[0-9a-f]{6}$/i.test(value || '') ? value : fallback;
+const assColor = (hex, alpha = '00') => {
+  const value = validHex(hex, '#ffffff').slice(1);
+  return `&H${alpha}${value.slice(4, 6)}${value.slice(2, 4)}${value.slice(0, 2)}`;
+};
+export function explainerCaptionFilter(input = 'studio', subtitlePath = '/tmp/captions.srt') {
+  const options = typeof input === 'string' ? { style: input } : (input || {});
   const styles = {
     studio: 'FontName=DejaVu Sans,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H70000000,BackColour=&H70000000,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=52',
     minimal: 'FontName=DejaVu Sans,FontSize=19,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,BackColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=50',
     editorial: 'FontName=DejaVu Serif,FontSize=17,PrimaryColour=&H00FFFFFF,OutlineColour=&H85000000,BackColour=&H85000000,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=58',
     bold: 'FontName=DejaVu Sans,FontSize=23,Bold=1,PrimaryColour=&H0019E6FF,OutlineColour=&H00101010,BackColour=&H40000000,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=48'
   };
-  return `subtitles=${subtitlePath}:force_style='${styles[style] || styles.studio}'`;
+  if (!options.font && !options.size && !options.textColor && !options.backgroundColor && !options.position) return `subtitles=${subtitlePath}:force_style='${styles[options.style] || styles.studio}'`;
+  const fonts = { sans: 'DejaVu Sans', serif: 'DejaVu Serif', mono: 'DejaVu Sans Mono' };
+  const alignment = { bottom: 2, center: 5, top: 8 }[options.position] || 2;
+  const margin = alignment === 2 ? 52 : alignment === 8 ? 48 : 0;
+  const fontSize = Math.max(14, Math.min(32, Number(options.size) || 18));
+  const primary = assColor(options.textColor, '00');
+  const background = assColor(options.backgroundColor, options.style === 'minimal' ? 'FF' : '70');
+  const borderStyle = options.style === 'minimal' || options.style === 'bold' ? 1 : 3;
+  const outline = options.style === 'bold' ? 3 : options.style === 'minimal' ? 2 : 1;
+  const bold = options.style === 'bold' ? 1 : 0;
+  return `subtitles=${subtitlePath}:force_style='FontName=${fonts[options.font] || fonts.sans},FontSize=${fontSize},Bold=${bold},PrimaryColour=${primary},OutlineColour=&H00101010,BackColour=${background},BorderStyle=${borderStyle},Outline=${outline},Shadow=0,Alignment=${alignment},MarginV=${margin}'`;
 }
 function srtTime(seconds) {
   const ms = Math.round(seconds * 1000);
@@ -36,23 +52,63 @@ export function captionChunks(text, maxWords = 7, maxCharacters = 52) {
   return chunks;
 }
 
-export function buildCaptions(timeline) {
+export function buildCaptions(timeline, options = {}) {
   let cursor = 0;
   let cue = 1;
   const entries = [];
   for (const part of timeline) {
-    const chunks = captionChunks(part.text);
+    const chunks = captionChunks(part.text, Math.max(3, Math.min(10, Number(options.wordsPerCue) || 7)));
     const weights = chunks.map(chunk => chunk.split(/\s+/).length);
     const totalWeight = weights.reduce((sum, weight) => sum + weight, 0) || 1;
     let sceneCursor = cursor;
     chunks.forEach((chunk, index) => {
-      const end = index === chunks.length - 1 ? cursor + part.duration : sceneCursor + part.duration * weights[index] / totalWeight;
+      const captionDuration = Math.min(part.duration, Number(part.captionDuration) || part.duration);
+      const end = index === chunks.length - 1 ? cursor + captionDuration : sceneCursor + captionDuration * weights[index] / totalWeight;
       entries.push(`${cue++}\n${srtTime(sceneCursor)} --> ${srtTime(end)}\n${chunk}\n`);
       sceneCursor = end;
     });
     cursor += part.duration;
   }
   return entries.join('\n');
+}
+
+export function actionFingerprint(action = {}) {
+  const type = String(action.type || 'wait');
+  if (type === 'wait') return 'wait';
+  if (type === 'scroll') return `scroll:${action.direction === 'up' ? 'up' : 'down'}`;
+  if (type === 'visit') return `visit:${String(action.url || '').replace(/\/$/, '')}`;
+  if (['click','double_click','right_click','type','drag'].includes(type) && action.selector) return `${type}:${String(action.selector)}:${String(action.text || action.value || '')}`;
+  if (['click','double_click','right_click','type','drag'].includes(type) && Number.isFinite(Number(action.x)) && Number.isFinite(Number(action.y))) return `${type}:${Math.round(Number(action.x) / 24)}:${Math.round(Number(action.y) / 24)}:${String(action.text || action.value || '')}`;
+  return `${type}:${String(action.selector || '')}:${String(action.value || action.key || '')}`;
+}
+
+export function actionIsCompatible(action = {}, screen = {}) {
+  const type = String(action.type || 'wait');
+  if (process.env.COMPUTER_USE_SNAPSHOT_ID) {
+    if (['wait','scroll','visit','key'].includes(type)) return type !== 'visit' || /^https?:\/\//i.test(action.url || '');
+    if (!['click','double_click','right_click','type','drag'].includes(type)) return false;
+    const selector = String(action.selector || '');
+    if (/^@[a-zA-Z0-9_-]+$/.test(selector)) {
+      const ref = selector.slice(1);
+      const line = String(screen.content || '').split('\n').find(value => value.includes(`[ref=${ref}]`)) || '';
+      if (!line) return false;
+      if (['click','double_click','right_click'].includes(type)) return /\b(link|button|checkbox|radio|tab|menuitem|option)\b/i.test(line);
+      if (type === 'type') return /\b(textbox|searchbox|input|textarea|combobox)\b/i.test(line) && Boolean(String(action.text || action.value || '').trim());
+    }
+    const x = Number(action.x), y = Number(action.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x >= 1920 || y < 0 || y >= 1080) return false;
+    if (type === 'drag') return Number.isFinite(Number(action.endX)) && Number.isFinite(Number(action.endY));
+    return type !== 'type' || Boolean(String(action.text || action.value || '').trim());
+  }
+  if (['wait','scroll','visit'].includes(type)) return true;
+  const ref = String(action.selector || '').replace(/^@/, '');
+  const line = String(screen.content || '').split('\n').find(value => value.includes(`[ref=${ref}]`)) || '';
+  if (!line) return false;
+  if (type === 'click') return /\b(link|button|checkbox|radio|tab|menuitem|option)\b/i.test(line);
+  if (type === 'type' || type === 'fill') return /\b(textbox|searchbox|input|textarea|combobox)\b/i.test(line);
+  if (type === 'select') return /\b(combobox|listbox|option|select)\b/i.test(line);
+  if (type === 'press') return /\b(button|textbox|searchbox|combobox|slider|spinbutton|tab)\b/i.test(line);
+  return false;
 }
 
 export async function normalizeSceneVideo(browser, inputPath, outputPath, duration) {
@@ -84,14 +140,19 @@ export async function explainerSceneBudget(id) {
   return Math.max(4, Math.min(20, explicitSteps ? explicitSteps + 3 : Math.ceil(words / 14) + 4));
 }
 
-export async function planScene(id, screen, completed, index, finalAllowedScene = false) {
+export async function planScene(id, screen, history, index, finalAllowedScene = false) {
   'use step';
   const item = await explainer(id);
   await setExplainerFields(id, { progress: `Directing scene ${index + 1}` });
   const provider = modelProviders.get('gateway');
-  const system = `You direct premium product explainer videos. Return one JSON object with narration, action, and done. The action is one of: {"type":"click","selector":"@e1"}, {"type":"type","selector":"@e1","value":"visible demo value"}, {"type":"select","selector":"@e1","value":"option value"}, {"type":"press","selector":"@e1","key":"ArrowRight"}, {"type":"scroll","direction":"down","amount":650}, {"type":"visit","url":"https://..."}, or {"type":"wait","ms":800}. Use only element refs visible in the supplied accessibility snapshot. Prefer one visible, reversible interaction in every scene; use wait only for the opening or when there is no safe interaction. Use type rather than fill so the viewer sees text being entered. Keep narration between 15 and 32 words and describe only what is visible now or what the action in this scene will visibly demonstrate. Never repeat instructions or claim an action succeeded before the resulting screen proves it. Move through the requested workflow in a coherent order. Stay read-only: never delete, submit payments, change settings, log out, or send messages. Set done true once the requested workflow has been covered. Do not mention automation, selectors, credentials, or that you are an AI.`;
-  const context = `Application: ${item.url}\nRequested coverage: ${item.brief}\nScene: ${index + 1}${finalAllowedScene ? '\nThis is the final safe scene budget. Cover the most important remaining visible point and set done true.' : ''}\nAlready narrated:\n${completed.join('\n')}\nCurrent page: ${screen.title}\nAccessibility snapshot:\n${screen.content}`;
-  return provider.generate([{ role: 'system', content: system }, { role: 'user', content: context }], process.env.EXPLAINER_MODEL || process.env.AI_GATEWAY_MODEL);
+  const computerUse = Boolean(process.env.COMPUTER_USE_SNAPSHOT_ID);
+  const system = computerUse
+    ? `You direct a continuous product walkthrough by looking at a 1920x1080 screenshot and operating the visible desktop like a careful human. Return one JSON object with narration, action, and done. Actions: {"type":"click","selector":"@e2","x":500,"y":300}, {"type":"double_click","selector":"@e2","x":500,"y":300}, {"type":"right_click","selector":"@e2","x":500,"y":300}, {"type":"type","selector":"@e4","x":500,"y":300,"text":"visible demo value"}, {"type":"key","key":"Return"}, {"type":"scroll","direction":"down","amount":5}, {"type":"drag","x":400,"y":300,"endX":800,"endY":300}, {"type":"visit","url":"https://..."}, or {"type":"wait","ms":800}. Coordinates refer to the supplied screenshot. When the accessibility snapshot contains the intended web control, include its exact @e ref as selector and also provide the visible approximate coordinates. Use coordinates alone for canvas, remote desktop, or other targets without a ref. The screenshot is primary visual context; the ref anchors small targets reliably. Use an ordinary left click for web links, buttons, and controls. Use double click, right click, or drag only when the requested workflow explicitly requires that gesture. Every scene must advance the requested workflow or reveal a new part of the interface. Never repeat an action, screen, named section, typed field, or narration. After one scroll, interact with a newly visible control or finish. Prefer one safe reversible visible interaction in each scene. Keep narration between 12 and 28 words and introduce the action that happens during the sentence. Never delete, purchase, publish, send messages, change account settings, log out, or submit irreversible forms. Set done true as soon as the requested coverage is complete. Do not mention automation, coordinates, credentials, or that you are an AI.`
+    : `You direct a continuous, human-operated premium product walkthrough. Return one JSON object with narration, action, and done. The action is one of: {"type":"click","selector":"@e1"}, {"type":"type","selector":"@e1","value":"visible demo value"}, {"type":"select","selector":"@e1","value":"option value"}, {"type":"press","selector":"@e1","key":"ArrowRight"}, {"type":"scroll","direction":"down","amount":900}, {"type":"visit","url":"https://..."}, or {"type":"wait","ms":800}. Use only element refs visible in the current accessibility snapshot. Click only refs labeled link, button, checkbox, radio, tab, menuitem, or option. Type only into refs labeled textbox, searchbox, input, textarea, or combobox. Every scene must advance the requested workflow or reveal a new part of the interface. Never repeat any prior action, screen, named section, typed field, or narration. One scroll scene is enough to reveal a section; after scrolling, interact with a new visible control or set done true. Prefer one visible, reversible interaction in every scene; use wait only for the opening or final wrap-up. Use type rather than fill so real keystrokes appear in the recording. Keep narration between 12 and 28 words and time it as a human explanation of the action occurring now. Describe only what is visible or what this scene's action will visibly demonstrate. Stay read-only unless the user's brief explicitly requires a safe reversible submission: never delete, submit payments, change account settings, log out, send messages, or publish content. Set done true immediately after the requested workflow has been covered. Do not mention automation, selectors, credentials, or that you are an AI.`;
+  const context = `Application: ${item.url}\nRequested coverage: ${item.brief}\nScene: ${index + 1}${finalAllowedScene ? '\nThis is the final safe scene budget. Cover the most important remaining visible point and set done true.' : ''}\nCompleted scene history (do not repeat any narration or action):\n${JSON.stringify(history)}\nCurrent page: ${screen.title}\nAccessibility snapshot:\n${screen.content}`;
+  if (!computerUse) return provider.generate([{ role: 'system', content: system }, { role: 'user', content: context }], process.env.EXPLAINER_MODEL || process.env.AI_GATEWAY_MODEL);
+  const capture = await new VercelEpisodeSandbox(id, () => {}).captureForModel(item.url);
+  return provider.generateVisual([{ role: 'system', content: system }, { role: 'user', content: `${context}\nThe attached image is the current live desktop screenshot.` }], capture.image, process.env.AI_GATEWAY_COMPUTER_MODEL || process.env.EXPLAINER_MODEL);
 }
 
 export async function renderScene(id, index, narration, action) {
@@ -110,18 +171,27 @@ export async function renderScene(id, index, narration, action) {
   const videoPath = `/tmp/explainer-${index}.mp4`;
   await browser.writeSandboxFile(audioPath, Buffer.concat(chunks));
   const probe = await browser.run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audioPath]);
-  const duration = Math.max(2, Math.min(40, Number((await probe.stdout()).trim()) || 8));
+  const speechDuration = Math.max(2, Math.min(40, Number((await probe.stdout()).trim()) || 8));
+  const recordingStarted = Date.now();
+  let recordedMs = speechDuration * 1000;
   await browser.startVideo(rawVideoPath);
   try {
-    await browser.command(['wait', '900']);
-    await browser.performBrowserAction(action);
-    await browser.command(['wait', String(Math.ceil(Math.max(900, duration * 1000 - 450)))]);
+    await browser.command(['wait', '450']);
+    if (browser.computerUseEnabled()) await browser.performComputerAction(action);
+    else await browser.performBrowserAction(action);
+    const remaining = speechDuration * 1000 - (Date.now() - recordingStarted);
+    if (remaining > 0) await browser.command(['wait', String(Math.ceil(Math.max(500, remaining)))]);
   } finally {
+    recordedMs = Date.now() - recordingStarted;
     await browser.stopVideo().catch(() => {});
   }
   const screen = await browser.capture(null, item.url);
+  const duration = Math.max(speechDuration, Math.min(40, recordedMs / 1000));
   const normalized = await normalizeSceneVideo(browser, rawVideoPath, videoPath, duration);
-  return { duration, video: normalized.path, audio: audioPath, screen, usedScreenshotFallback: normalized.usedScreenshotFallback };
+  const paddedAudioPath = `/tmp/explainer-${index}.m4a`;
+  const padded = await browser.run('ffmpeg', ['-y', '-i', audioPath, '-af', 'apad', '-t', String(duration), '-c:a', 'aac', '-b:a', '192k', paddedAudioPath], 5 * 60 * 1000);
+  if (padded.exitCode) throw new Error(`Could not align narration with the recorded action: ${(await padded.stderr()).slice(-1000)}`);
+  return { duration, captionDuration: speechDuration, video: normalized.path, audio: paddedAudioPath, screen, action, usedScreenshotFallback: normalized.usedScreenshotFallback };
 }
 
 export async function finishExplainer(id, timeline) {
@@ -131,7 +201,8 @@ export async function finishExplainer(id, timeline) {
   const browser = new VercelEpisodeSandbox(id, () => {});
   const videoList = timeline.map(part => `file '${part.video}'`).join('\n');
   const audioList = timeline.map(part => `file '${part.audio}'`).join('\n');
-  const captions = buildCaptions(timeline);
+  const captionOptions = { style: item.captionStyle || 'studio', ...(item.captionOptions || {}) };
+  const captions = buildCaptions(timeline, captionOptions);
   await browser.writeSandboxFile('/tmp/videos.txt', videoList);
   await browser.writeSandboxFile('/tmp/audio.txt', audioList);
   await browser.writeSandboxFile('/tmp/captions.srt', captions);
@@ -142,15 +213,13 @@ export async function finishExplainer(id, timeline) {
   if (result.exitCode) throw new Error(`Could not assemble browser recording: ${(await result.stderr()).slice(-1200)}`);
   result = await browser.run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', '/tmp/audio.txt', '-c:a', 'aac', '-b:a', '192k', '/tmp/narration.m4a'], 10 * 60 * 1000);
   if (result.exitCode) throw new Error(`Could not assemble narration: ${(await result.stderr()).slice(-1200)}`);
-  result = await browser.run('ffmpeg', ['-y', '-i', '/tmp/picture.mp4', '-i', '/tmp/narration.m4a', '-vf', explainerCaptionFilter(item.captionStyle), '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-shortest', '/tmp/final.mp4'], 15 * 60 * 1000);
-  if (result.exitCode) {
-    result = await browser.run('ffmpeg', ['-y', '-i', '/tmp/picture.mp4', '-i', '/tmp/narration.m4a', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-shortest', '/tmp/final.mp4'], 15 * 60 * 1000);
-  }
+  const finalArgs = ['-y', '-i', '/tmp/picture.mp4', '-i', '/tmp/narration.m4a', ...(captionOptions.enabled === false ? [] : ['-vf', explainerCaptionFilter(captionOptions)]), '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-shortest', '/tmp/final.mp4'];
+  result = await browser.run('ffmpeg', finalArgs, 15 * 60 * 1000);
   if (result.exitCode) throw new Error(`Could not render the final video: ${(await result.stderr()).slice(-1200)}`);
   const [video, srt] = await Promise.all([browser.readSandboxFile('/tmp/final.mp4'), browser.readSandboxFile('/tmp/captions.srt')]);
   const stem = `explainer-${safeName(id)}`;
   const [videoUrl, captionsUrl] = await Promise.all([putNamedAsset(`${stem}.mp4`, video), putNamedAsset(`${stem}.srt`, srt)]);
-  await setExplainerFields(id, { status: 'complete', progress: 'Complete', endedAt: stamp(), video: videoUrl, captions: captionsUrl, transcript: timeline.map(part => part.text) });
+  await setExplainerFields(id, { status: 'complete', progress: 'Complete', endedAt: stamp(), video: videoUrl, captions: captionsUrl, transcript: timeline.map(part => part.text), actions: timeline.map(part => part.action) });
   await browser.close().catch(() => {});
 }
 

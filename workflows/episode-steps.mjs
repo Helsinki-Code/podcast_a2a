@@ -33,7 +33,12 @@ export async function plan(episodeId, role, screen, mode, extra = '') {
   const provider = modelProviders.get(agent.modelProvider || 'gateway');
   if (!provider) throw new Error(`Model provider unavailable: ${agent.modelProvider}`);
   if (mode === 'turn') await emit(episodeId, 'thinking', { role });
-  return provider.generate(ownContext(item, role, agent, screen, mode, extra), agent.model);
+  const messages = ownContext(item, role, agent, screen, mode, extra);
+  if (process.env.COMPUTER_USE_SNAPSHOT_ID && mode === 'turn' && screen?.type === 'browser' && provider.generateVisual) {
+    const capture = await new VercelEpisodeSandbox(episodeId, () => {}, screen, role).captureForModel(item.settings?.demo?.url || '');
+    return provider.generateVisual(messages, capture.image, process.env.AI_GATEWAY_COMPUTER_MODEL || agent.model);
+  }
+  return provider.generate(messages, agent.model);
 }
 export async function interjectionVerdict(episodeId, otherRole, currentRole, phrase, screen) {
   'use step';

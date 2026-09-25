@@ -1,7 +1,7 @@
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const esc = text => String(text ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = { personas: [], episodes: [], explainers: [], config: null, account: null, clerk: null, current: null, eventSource: null, pollTimer: null, explainerPoll: null, recorder: null, recorderChunks: [], audioContext: null, audioElement: null, speechElements: {}, sandboxAudioElement: null, sandboxPlaying: false, pendingSandboxAudio: null, audioUnlock: null, analyser: null, audioDestination: null, queue: [], playing: false, screen: { type: 'idle', title: 'The stage is ready', content: '' }, speaker: null, caption: '', amplitude: 0, startTime: 0, hostImage: null, guestImage: null, screenImage: null, ended: false, seen: new Set(), credentials: new Map(), localVideoUrl: null, mediaCancels: new Map() };
+const state = { personas: [], episodes: [], explainers: [], config: null, account: null, clerk: null, current: null, eventSource: null, pollTimer: null, explainerPoll: null, recorder: null, recorderChunks: [], audioContext: null, audioElement: null, speechElements: {}, sandboxAudioElement: null, sandboxPlaying: false, screenVideoElement: null, screenVideoPlaying: false, pendingSandboxAudio: null, audioUnlock: null, analyser: null, audioDestination: null, queue: [], playing: false, screen: { type: 'idle', title: 'The stage is ready', content: '' }, speaker: null, caption: '', amplitude: 0, startTime: 0, hostImage: null, guestImage: null, screenImage: null, ended: false, seen: new Set(), credentials: new Map(), localVideoUrl: null, mediaCancels: new Map() };
 
 async function api(path, options = {}) {
   const token = await state.clerk?.session?.getToken().catch(() => null);
@@ -123,7 +123,7 @@ async function openStudio(id) {
   if (state.localVideoUrl) { URL.revokeObjectURL(state.localVideoUrl); state.localVideoUrl = null; }
   state.current = await api(`/api/episodes/${id}`);
   state.current.turns = [];
-  state.screen = { type: 'idle', title: 'The stage is ready', content: '' }; state.screenImage = null; state.speaker = null; state.caption = ''; state.amplitude = 0; state.queue = []; state.playing = false; state.sandboxPlaying = false; state.pendingSandboxAudio = null; state.seen = new Set(); state.ended = ['complete','stopped','failed','interrupted'].includes(state.current.status);
+  state.screen = { type: 'idle', title: 'The stage is ready', content: '' }; state.screenImage = null; state.screenVideoElement = null; state.screenVideoPlaying = false; state.speaker = null; state.caption = ''; state.amplitude = 0; state.queue = []; state.playing = false; state.sandboxPlaying = false; state.pendingSandboxAudio = null; state.seen = new Set(); state.ended = ['complete','stopped','failed','interrupted'].includes(state.current.status);
   state.hostImage = await loadImage(episodePerson(state.current,'host')?.image); state.guestImage = await loadImage(episodePerson(state.current,'guest')?.image);
   $('#studioTitle').textContent = state.current.outline.subject;
   $('#studioMeta').textContent = `${episodePerson(state.current,'host')?.name || 'Host'} × ${episodePerson(state.current,'guest')?.name || 'Guest'} · ${shortDate(state.current.createdAt)}`;
@@ -187,8 +187,19 @@ function credentialsForCurrentEpisode() {
   return new Promise(resolve => {
     let value = null;
     const submit = event => { event.preventDefault(); value = { username: form.elements.username.value, password: form.elements.password.value }; dialog.close(); };
-    const close = () => { form.removeEventListener('submit', submit); dialog.removeEventListener('close', close); resolve(value); };
-    form.addEventListener('submit', submit); dialog.addEventListener('close', close); dialog.showModal();
+    const openDesktop = async () => {
+      const popup = window.open('about:blank', '_blank'); if (popup) popup.opener = null;
+      try { const { liveUrl } = await api(`/api/episodes/${state.current.id}/desktop`); if (popup) popup.location = liveUrl; else window.open(liveUrl, '_blank', 'noopener'); }
+      catch (error) { popup?.close(); notice(error.message); }
+    };
+    const desktopReady = async () => {
+      const button = $('#episodeDesktopReady'); button.disabled = true;
+      try { await api(`/api/episodes/${state.current.id}/desktop-ready`, { method: 'POST' }); value = { manualPrepared: true }; dialog.close(); }
+      catch (error) { notice(error.message); }
+      finally { button.disabled = false; }
+    };
+    const close = () => { form.removeEventListener('submit', submit); $('#openEpisodeDesktop').removeEventListener('click', openDesktop); $('#episodeDesktopReady').removeEventListener('click', desktopReady); dialog.removeEventListener('close', close); resolve(value); };
+    form.addEventListener('submit', submit); $('#openEpisodeDesktop').addEventListener('click', openDesktop); $('#episodeDesktopReady').addEventListener('click', desktopReady); dialog.addEventListener('close', close); dialog.showModal();
   });
 }
 function appendTranscript(role, text) { const pane = $('#transcriptPane'); pane.insertAdjacentHTML('beforeend', `<div class="transcript-item ${role}"><strong>${esc(role)} · LIVE</strong><p>${esc(text)}</p></div>`); pane.scrollTop = pane.scrollHeight; }
@@ -207,7 +218,7 @@ function processEvent(event, history = false) {
   }
   if (event.type === 'tool_start') { appendActivity(`Started ${event.tool}`, JSON.stringify(event.input).slice(0, 350)); state.screen = { type: 'working', title: `${event.tool} in progress`, content: 'Live sandbox activity…' }; }
   if (event.type === 'tool_output') { state.screen = event.screen || { type: 'terminal', title: event.tool, content: event.chunk }; }
-  if (event.type === 'tool_end') { state.screen = event.screen; appendActivity(`${event.tool} finished`, event.screen?.content?.slice(0, 500), event.screen?.asset || event.screen?.image); if (event.screen?.image) loadImage(event.screen.image).then(img => { state.screenImage = img; drawStage(); }); if (!history && event.screen?.audio) playSandboxAudio(event.screen.audio); }
+  if (event.type === 'tool_end') { state.screen = event.screen; appendActivity(`${event.tool} finished`, event.screen?.content?.slice(0, 500), event.screen?.asset || event.screen?.video || event.screen?.image); if (event.screen?.image) loadImage(event.screen.image).then(img => { state.screenImage = img; drawStage(); }); if (!history && event.screen?.video) playScreenVideo(event.screen.video); if (!history && event.screen?.audio) playSandboxAudio(event.screen.audio); }
   if (event.type === 'interrupt') appendActivity(`${event.by} interjected`, event.reason);
   if (event.type === 'notice') appendActivity('Note', event.message);
   drawStage();
@@ -311,7 +322,14 @@ async function finishRecording() {
     else notice('The continuous take is ready to download.', true);
   } catch (error) { notice(`Cloud copy failed, but the Download finished video button still works: ${error.message}`); }
 }
-function maybeFinish() { if (state.ended && !state.playing && !state.sandboxPlaying && !state.queue.length) finishRecording(); }
+function maybeFinish() { if (state.ended && !state.playing && !state.sandboxPlaying && !state.screenVideoPlaying && !state.queue.length) finishRecording(); }
+async function playScreenVideo(url) {
+  const video = document.createElement('video'); video.muted = true; video.playsInline = true; video.preload = 'auto'; video.src = url;
+  state.screenVideoElement = video; state.screenVideoPlaying = true;
+  try { await video.play(); await new Promise(resolve => { video.addEventListener('ended', resolve, { once: true }); video.addEventListener('error', resolve, { once: true }); }); }
+  catch (error) { notice(`Desktop action playback failed: ${error.message || error}`); }
+  finally { state.screenVideoPlaying = false; if (state.screenVideoElement === video) state.screenVideoElement = null; maybeFinish(); }
+}
 function waitForTail(element, leadSeconds = .14) {
   return new Promise(resolve => {
     let settled = false;
@@ -350,7 +368,7 @@ async function playQueue() {
   state.playing = false; state.speaker = null; state.caption = ''; state.amplitude = 0; drawStage(); maybeFinish();
 }
 function stopLocalPlayback() {
-  state.ended = true; state.queue = []; state.pendingSandboxAudio = null; state.playing = false; state.sandboxPlaying = false;
+  state.ended = true; state.queue = []; state.pendingSandboxAudio = null; state.playing = false; state.sandboxPlaying = false; state.screenVideoPlaying = false; if (state.screenVideoElement) { state.screenVideoElement.pause(); state.screenVideoElement = null; }
   for (const [element, cancel] of state.mediaCancels) { cancel(); element.pause(); element.removeAttribute('src'); element.load(); }
   state.mediaCancels.clear(); state.speaker = null; state.caption = ''; state.amplitude = 0; $('#enableAudio').classList.add('hidden'); drawStage();
 }
@@ -380,7 +398,7 @@ function drawStage() {
   const glow=state.current?.settings.glowStrength||1;
   drawPersona(ctx,episodePerson(state.current,'host'),'HOST',state.hostImage,cx1,y1,r,state.speaker==='host',accent,glow);
   drawPersona(ctx,episodePerson(state.current,'guest'),'GUEST',state.guestImage,cx2,y2,r,state.speaker==='guest',state.current?.settings.guestAccent||'#efbe9e',glow);
-  if(active){const w=Math.round(1280*(state.current?.settings.paneWidth||66)/100),x=stage?1280-w-55:(1280-w)/2,y=stage?116:405,h=stage?500:235;ctx.fillStyle='#10242b';rounded(ctx,x,y,w,h,16);ctx.fill();ctx.strokeStyle='#487068';ctx.lineWidth=2;ctx.stroke();ctx.fillStyle=accent;ctx.font='bold 13px Arial';ctx.fillText((state.screen.title||'SANDBOX').slice(0,70),x+22,y+31);ctx.fillStyle='#a9c8c2';ctx.font='13px Arial';if(state.screenImage&&state.screen.image){try{const maxW=w-40,maxH=h-67,scale=Math.min(maxW/state.screenImage.width,maxH/state.screenImage.height),iw=state.screenImage.width*scale,ih=state.screenImage.height*scale;ctx.drawImage(state.screenImage,x+20+(maxW-iw)/2,y+49+(maxH-ih)/2,iw,ih)}catch{}}else wrap(ctx,state.screen.content||'Working…',x+22,y+67,w-44,21,Math.floor((h-65)/21));}
+  if(active){const w=Math.round(1280*(state.current?.settings.paneWidth||66)/100),x=stage?1280-w-55:(1280-w)/2,y=stage?116:405,h=stage?500:235;ctx.fillStyle='#10242b';rounded(ctx,x,y,w,h,16);ctx.fill();ctx.strokeStyle='#487068';ctx.lineWidth=2;ctx.stroke();ctx.fillStyle=accent;ctx.font='bold 13px Arial';ctx.fillText((state.screen.title||'SANDBOX').slice(0,70),x+22,y+31);ctx.fillStyle='#a9c8c2';ctx.font='13px Arial';const visual=state.screenVideoElement&&state.screenVideoElement.readyState>=2?state.screenVideoElement:state.screenImage&&state.screen.image?state.screenImage:null;if(visual){try{const maxW=w-40,maxH=h-67,scale=Math.min(maxW/visual.videoWidth||maxW/visual.width,maxH/visual.videoHeight||maxH/visual.height),vw=visual.videoWidth||visual.width,vh=visual.videoHeight||visual.height,iw=vw*scale,ih=vh*scale;ctx.drawImage(visual,x+20+(maxW-iw)/2,y+49+(maxH-ih)/2,iw,ih)}catch{}}else wrap(ctx,state.screen.content||'Working…',x+22,y+67,w-44,21,Math.floor((h-65)/21));}
   drawCaption(ctx);ctx.fillStyle='#789b97';ctx.font='11px Arial';ctx.fillText('UNSCRIPTED · ONE CONTINUOUS TAKE',52,678);ctx.fillStyle='#ef8074';ctx.beginPath();ctx.arc(1179,44,5,0,Math.PI*2);ctx.fill();ctx.fillStyle='#b8d7cf';ctx.fillText('REC',1193,48);ctx.restore();
 }
 function drawPersona(ctx,p,role,img,x,y,r,speaking,color,glow=1){const power=speaking?Math.min(1,state.amplitude*4+.12):0;ctx.save();ctx.shadowColor=color;ctx.shadowBlur=speaking?(26+power*90)*glow:0;ctx.beginPath();ctx.arc(x,y,r+5+power*7,0,Math.PI*2);ctx.strokeStyle=color;ctx.globalAlpha=speaking?.5+power*.5:.25;ctx.lineWidth=(speaking?5+power*7:3)*glow;ctx.stroke();ctx.restore();ctx.save();ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.clip();if(img)ctx.drawImage(img,x-r,y-r,r*2,r*2);else{ctx.fillStyle=color;ctx.fillRect(x-r,y-r,r*2,r*2);ctx.fillStyle='#173038';ctx.font=`bold ${r}px Arial`;ctx.textAlign='center';ctx.fillText((p?.name||'?')[0].toUpperCase(),x,y+r*.35)}ctx.restore();ctx.fillStyle='#f1f5f1';ctx.font='bold 19px Arial';ctx.textAlign='center';ctx.fillText((p?.name||role).slice(0,24),x,y+r+35);ctx.fillStyle=color;ctx.font='bold 10px Arial';ctx.letterSpacing='2px';ctx.fillText(role,x,y+r+54);ctx.letterSpacing='0px';ctx.textAlign='left'}
@@ -393,22 +411,47 @@ function openExplainerDialog(item = null) {
       if (form.elements[name] && item[name] != null) form.elements[name].value = item[name];
     }
     form.elements.authRequired.checked = !!item.authRequired;
+    const captions = item.captionOptions || {};
+    form.elements.captionsEnabled.checked = captions.enabled !== false;
+    form.elements.captionFont.value = captions.font || 'sans';
+    form.elements.captionSize.value = captions.size || 18;
+    form.elements.captionTextColor.value = captions.textColor || '#ffffff';
+    form.elements.captionBackgroundColor.value = captions.backgroundColor || '#000000';
+    form.elements.captionPosition.value = captions.position || 'bottom';
+    form.elements.captionWords.value = captions.wordsPerCue || 7;
   }
   $('#explainerCredentials').classList.toggle('hidden', !form.elements.authRequired.checked);
+  $('#explainerManualDesktop').classList.add('hidden');
   for (const name of ['username','password']) form.elements[name].required = form.elements.authRequired.checked;
+  updateSubtitlePreview();
   $('#explainerDialog').showModal();
+}
+
+function updateSubtitlePreview() {
+  const form = $('#explainerForm'), preview = $('#subtitlePreview'), sample = preview.querySelector('span');
+  const style = form.elements.captionStyle.value, font = form.elements.captionFont.value, position = form.elements.captionPosition.value;
+  preview.dataset.style = style; preview.dataset.font = font; preview.dataset.position = position;
+  sample.style.fontSize = `${form.elements.captionSize.value}px`;
+  sample.style.color = form.elements.captionTextColor.value;
+  sample.style.backgroundColor = style === 'minimal' || style === 'bold' ? 'transparent' : `${form.elements.captionBackgroundColor.value}bb`;
+  sample.style.opacity = form.elements.captionsEnabled.checked ? '1' : '.25';
+  $('#captionSizeValue').textContent = `${form.elements.captionSize.value} px`;
+  $('#captionWordsValue').textContent = `${form.elements.captionWords.value} words`;
 }
 
 async function saveExplainerForm(event) {
   event.preventDefault();
   const form = event.currentTarget, button = form.querySelector('[type=submit]'); button.disabled = true;
+  let item = null;
   try {
     const authRequired = form.elements.authRequired.checked;
     if (authRequired && (!form.elements.username.value || !form.elements.password.value)) throw new Error('Enter the login username and password.');
     const existing = state.explainers.find(item => item.id === form.dataset.explainerId);
-    const item = existing || await api('/api/explainers', { method: 'POST', body: JSON.stringify({
+    item = existing || await api('/api/explainers', { method: 'POST', body: JSON.stringify({
       title: form.elements.title.value, url: form.elements.url.value, brief: form.elements.brief.value,
-      authRequired, voice: form.elements.voice.value, captionStyle: form.elements.captionStyle.value, loginUrl: form.elements.loginUrl.value,
+      authRequired, voice: form.elements.voice.value, captionStyle: form.elements.captionStyle.value,
+      captionOptions: { enabled: form.elements.captionsEnabled.checked, font: form.elements.captionFont.value, size: +form.elements.captionSize.value, textColor: form.elements.captionTextColor.value, backgroundColor: form.elements.captionBackgroundColor.value, position: form.elements.captionPosition.value, wordsPerCue: +form.elements.captionWords.value },
+      loginUrl: form.elements.loginUrl.value,
       usernameSelector: form.elements.usernameSelector.value, passwordSelector: form.elements.passwordSelector.value,
       submitSelector: form.elements.submitSelector.value
     }) });
@@ -426,7 +469,13 @@ async function saveExplainerForm(event) {
     $('#explainerDialog').close();
     await refreshMe(); await refresh(); navigate('explainers'); scheduleExplainerPoll();
     notice('The explainer is in production.', true);
-  } catch (error) { notice(error.message); }
+  } catch (error) {
+    if (item?.id && form.elements.authRequired.checked) {
+      form.dataset.explainerId = item.id;
+      $('#explainerManualDesktop').classList.remove('hidden');
+      notice(`${error.message} Finish the sign-in in the live desktop.`);
+    } else notice(error.message);
+  }
   finally { button.disabled = false; button.textContent = 'Create and generate'; }
 }
 
@@ -486,7 +535,10 @@ $$('[data-view]').forEach(b=>b.addEventListener('click',()=>navigate(b.dataset.v
 $$('.close-dialog').forEach(b=>b.addEventListener('click',()=>b.closest('dialog').close()));
 $('#personaForm').addEventListener('submit',savePersona);$('#episodeForm').addEventListener('submit',saveEpisode);
 $('#explainerForm').addEventListener('submit',saveExplainerForm);
+$('#openExplainerDesktop').addEventListener('click',async()=>{const id=$('#explainerForm').dataset.explainerId;if(!id)return notice('Create the explainer first.');const popup=window.open('about:blank','_blank');if(popup)popup.opener=null;try{const{liveUrl}=await api(`/api/explainers/${id}/desktop`);if(popup)popup.location=liveUrl;else window.open(liveUrl,'_blank','noopener')}catch(error){popup?.close();notice(error.message)}});
+$('#explainerDesktopReady').addEventListener('click',async()=>{const form=$('#explainerForm'),id=form.dataset.explainerId,button=$('#explainerDesktopReady');if(!id)return notice('Create the explainer first.');button.disabled=true;try{await api(`/api/explainers/${id}/desktop-ready`,{method:'POST'});await api(`/api/explainers/${id}/start`,{method:'POST'});form.elements.password.value='';$('#explainerDialog').close();await refreshMe();await refresh();navigate('explainers');scheduleExplainerPoll();notice('The explainer is in production.',true)}catch(error){notice(error.message)}finally{button.disabled=false}});
 $('#explainerForm').elements.authRequired.addEventListener('change',event=>{$('#explainerCredentials').classList.toggle('hidden',!event.target.checked);for(const name of ['username','password'])$('#explainerForm').elements[name].required=event.target.checked});
+for (const name of ['captionsEnabled','captionStyle','captionPosition','captionFont','captionSize','captionTextColor','captionBackgroundColor','captionWords']) $('#explainerForm').elements[name].addEventListener('input',updateSubtitlePreview);
 $('#personaForm').elements.imageFile.addEventListener('change',event=>{const file=event.target.files[0];if(file)$('#imagePreview').innerHTML=`<img src="${URL.createObjectURL(file)}" alt="Image preview">`});
 $('#personaForm').elements.knowledgeFiles.addEventListener('change',event=>{$('#knowledgeList').textContent=[...$('#personaForm')._knowledge.map(k=>k.name),...[...event.target.files].map(f=>f.name)].join(' · ')});
 $('#speechProvider').addEventListener('change',()=>{updateVoiceSuggestions();$('#voiceSelect').value=state.config?.providers.voices?.[$('#speechProvider').value]?.[0]||''});
@@ -499,7 +551,7 @@ document.addEventListener('click', event => { const podcast = event.target.close
 $('#backToEpisodes').addEventListener('click',()=>navigate('episodes'));
 $('#fullscreenStage').addEventListener('click',()=>$('#stage').requestFullscreen());
 $$('.side-tab').forEach(b=>b.addEventListener('click',()=>{$$('.side-tab').forEach(x=>x.classList.toggle('active',x===b));$('#transcriptPane').classList.toggle('hidden',b.dataset.side!=='transcript');$('#activityPane').classList.toggle('hidden',b.dataset.side!=='activity')}));
-$('#startEpisode').addEventListener('click',async()=>{const button=$('#startEpisode');try{const audioUnlock=unlockAudio();for(const p of [episodePerson(state.current,'host'),episodePerson(state.current,'guest')]){if(!state.config.providers.ready.models[p.modelProvider||'gateway']||!state.config.providers.ready.speech[p.speechProvider||'gateway'])throw new Error(`Configure ${p.name}'s model and speech providers before starting.`)}const credentials=await credentialsForCurrentEpisode();if(state.current.settings.demo?.authRequired&&!credentials)return;button.disabled=true;button.textContent=credentials?'Signing in securely…':'Preparing…';if(credentials){await api(`/api/episodes/${state.current.id}/prepare`,{method:'POST',body:JSON.stringify({credentials})});state.credentials.delete(state.current.id)}await audioUnlock;await startRecording();button.classList.add('hidden');await api(`/api/episodes/${state.current.id}/start`,{method:'POST'});setStatus('preparing');await refreshMe()}catch(error){notice(error.message);if(state.recorder?.state==='recording')state.recorder.stop()}finally{button.disabled=false;button.textContent='Start recording'}});
+$('#startEpisode').addEventListener('click',async()=>{const button=$('#startEpisode');try{const audioUnlock=unlockAudio();for(const p of [episodePerson(state.current,'host'),episodePerson(state.current,'guest')]){if(!state.config.providers.ready.models[p.modelProvider||'gateway']||!state.config.providers.ready.speech[p.speechProvider||'gateway'])throw new Error(`Configure ${p.name}'s model and speech providers before starting.`)}const credentials=await credentialsForCurrentEpisode();if(state.current.settings.demo?.authRequired&&!credentials)return;button.disabled=true;button.textContent=credentials?'Signing in securely…':'Preparing…';if(credentials&&!credentials.manualPrepared){await api(`/api/episodes/${state.current.id}/prepare`,{method:'POST',body:JSON.stringify({credentials})});state.credentials.delete(state.current.id)}await audioUnlock;await startRecording();button.classList.add('hidden');await api(`/api/episodes/${state.current.id}/start`,{method:'POST'});setStatus('preparing');await refreshMe()}catch(error){notice(error.message);if(state.recorder?.state==='recording')state.recorder.stop()}finally{button.disabled=false;button.textContent='Start recording'}});
 $('#enableAudio').addEventListener('click',async()=>{const button=$('#enableAudio');button.disabled=true;try{await unlockAudio();if(state.audioContext.state==='suspended')await state.audioContext.resume();button.classList.add('hidden');const pending=state.pendingSandboxAudio;state.pendingSandboxAudio=null;if(pending)playSandboxAudio(pending);playQueue()}catch(error){notice(`Audio could not be enabled: ${error.message || error}`)}finally{button.disabled=false}});
 $('#restartEpisode').addEventListener('click',()=>restartPodcast(state.current.id).catch(error=>notice(error.message)));
 $('#stopEpisode').addEventListener('click',async()=>{const button=$('#stopEpisode');button.disabled=true;try{await api(`/api/episodes/${state.current.id}/stop`,{method:'POST'});stopLocalPlayback();setStatus('stopped');await finishRecording();await refreshMe();await refresh();notice('Episode stopped. The video is ready below.',true)}catch(error){notice(error.message)}finally{button.disabled=false}});

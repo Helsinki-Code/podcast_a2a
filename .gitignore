@@ -11,3 +11,4 @@ data/
 .env*
 /.agents/
 /scripts/podcast-e2e.mjs
+/ai-sdk-computer-use/

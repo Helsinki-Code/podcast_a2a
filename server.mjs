@@ -14,6 +14,7 @@ import { availableProviders, supportedVoice } from './lib/providers.mjs';
 import { runEpisode, stopEpisode } from './lib/engine.mjs';
 import { openLiveAudio } from './lib/audio.mjs';
 import { buildIndex } from './lib/rag.mjs';
+import { assertPublicHttpUrl } from './lib/url-security.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let initialization;
@@ -106,12 +107,13 @@ export async function handler(req, res) {
     await ensureInitialized();
     const url = new URL(req.url, 'http://localhost');
     const parts = url.pathname.split('/').filter(Boolean);
-    if (url.pathname === '/health' && req.method === 'GET') return json(res, 200, { ok: true });
+    if (['/health', '/api/health'].includes(url.pathname) && req.method === 'GET') return json(res, 200, { ok: true });
     if (url.pathname === '/api/webhooks/stripe' && req.method === 'POST') {
       const raw = await rawBody(req, 2_000_000);
       return json(res, 200, await processStripeWebhook(raw, req.headers['stripe-signature'] || ''));
     }
     if (url.pathname === '/' && req.method === 'GET') return staticFile(req, res, path.join(here, 'public'), 'index.html');
+    if (url.pathname === '/favicon.ico' && req.method === 'GET') return staticFile(req, res, path.join(here, 'public'), 'favicon.ico');
     if (url.pathname === '/privacy' && req.method === 'GET') return staticFile(req, res, path.join(here, 'public'), 'privacy.html');
     if (url.pathname === '/terms' && req.method === 'GET') return staticFile(req, res, path.join(here, 'public'), 'terms.html');
     if (parts[0] === 'public' && req.method === 'GET') return staticFile(req, res, path.join(here, 'public'), parts.slice(1).join('/'));
@@ -206,10 +208,10 @@ export async function handler(req, res) {
       const validColor = (color, fallback) => /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
       const fullHD = Number(input.settings?.width) === 1920 && Number(input.settings?.height) === 1080;
       const demoUrl = String(input.settings?.demo?.url || '').trim().slice(0, 1000);
-      if (demoUrl && !/^https?:\/\//i.test(demoUrl)) throw new Error('The demo URL must begin with http:// or https://.');
+      if (demoUrl) await assertPublicHttpUrl(demoUrl);
       const authRequired = !!input.settings?.demo?.authRequired;
       const demoLoginUrl = String(input.settings?.demo?.loginUrl || '').trim().slice(0, 1000);
-      if (demoLoginUrl && !/^https?:\/\//i.test(demoLoginUrl)) throw new Error('The demo login URL must begin with http:// or https://.');
+      if (demoLoginUrl) await assertPublicHttpUrl(demoLoginUrl);
       const item = {
         id: uid(), ownerId: auth.userId, createdAt: stamp(), status: 'draft', hostId: input.hostId, guestId: input.guestId,
         personas: { host: structuredClone(hostPersona), guest: structuredClone(guestPersona) },
@@ -287,6 +289,20 @@ export async function handler(req, res) {
         await setEpisodeFields(item.id, { demoPrepared: true });
         return json(res, 200, { ok: true });
       }
+      if (parts[3] === 'desktop' && req.method === 'GET') {
+        if (item.status !== 'draft') return error(res, 409, 'The secure desktop is available while the episode is a draft.');
+        const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
+        const liveUrl = await new VercelEpisodeSandbox(item.id, () => {}).interactiveDesktop(item.settings.demo?.loginUrl || item.settings.demo?.url);
+        if (!liveUrl) return error(res, 409, 'The visible Computer Use desktop is not configured.');
+        return json(res, 200, { liveUrl });
+      }
+      if (parts[3] === 'desktop-ready' && req.method === 'POST') {
+        if (item.status !== 'draft' || !item.settings.demo?.authRequired) return error(res, 409, 'This episode does not need manual browser preparation.');
+        const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
+        const screen = await new VercelEpisodeSandbox(item.id, () => {}).capture(null, item.settings.demo.url);
+        await setEpisodeFields(item.id, { demoPrepared: true, manualDesktopPrepared: true });
+        return json(res, 200, { ok: true, screen: { title: screen.title, image: screen.image } });
+      }
       if (parts[3] === 'ack' && req.method === 'POST') {
         const data = await body(req, 1000);
         const speech = item.events.find(event => event.id === data.eventId && event.type === 'speech');
@@ -349,9 +365,11 @@ export async function handler(req, res) {
       const targetUrl = String(input.url || '').trim().slice(0, 1200);
       const brief = String(input.brief || '').trim().slice(0, 3000);
       const loginUrl = String(input.loginUrl || '').trim().slice(0, 1200);
-      if (!/^https?:\/\//i.test(targetUrl)) return error(res, 400, 'Enter an application URL beginning with http:// or https://.');
-      if (loginUrl && !/^https?:\/\//i.test(loginUrl)) return error(res, 400, 'The login page URL must begin with http:// or https://.');
+      try { await assertPublicHttpUrl(targetUrl); if (loginUrl) await assertPublicHttpUrl(loginUrl); }
+      catch (cause) { return error(res, 400, cause.message); }
       if (brief.length < 20) return error(res, 400, 'Describe the workflow the video should explain.');
+      const captionInput = input.captionOptions || {};
+      const captionColor = (value, fallback) => /^#[0-9a-f]{6}$/i.test(value || '') ? value : fallback;
       const item = {
         id: uid(), ownerId: auth.userId, createdAt: stamp(), status: 'draft', url: targetUrl, brief,
         title: String(input.title || new URL(targetUrl).hostname).trim().slice(0, 120),
@@ -361,7 +379,16 @@ export async function handler(req, res) {
         passwordSelector: String(input.passwordSelector || 'input[type="password"], input[autocomplete="current-password"]').slice(0, 400),
         submitSelector: String(input.submitSelector || 'button[type="submit"], input[type="submit"], button[name*="login" i], button[name*="sign" i]').slice(0, 400),
         speechProvider: 'gateway', voice: supportedVoice('gateway', String(input.voice || ''), 'coral'),
-        captionStyle: ['studio','minimal','editorial','bold'].includes(input.captionStyle) ? input.captionStyle : 'studio'
+        captionStyle: ['studio','minimal','editorial','bold'].includes(input.captionStyle) ? input.captionStyle : 'studio',
+        captionOptions: {
+          enabled: captionInput.enabled !== false,
+          font: ['sans','serif','mono'].includes(captionInput.font) ? captionInput.font : 'sans',
+          size: Math.max(14, Math.min(32, Number(captionInput.size) || 18)),
+          textColor: captionColor(captionInput.textColor, '#ffffff'),
+          backgroundColor: captionColor(captionInput.backgroundColor, '#000000'),
+          position: ['bottom','center','top'].includes(captionInput.position) ? captionInput.position : 'bottom',
+          wordsPerCue: Math.max(3, Math.min(10, Number(captionInput.wordsPerCue) || 7))
+        }
       };
       await saveExplainer(item); return json(res, 201, item);
     }
@@ -381,7 +408,7 @@ export async function handler(req, res) {
         const credentials = { username: String(input.username || '').slice(0, 500), password: String(input.password || '').slice(0, 2000) };
         if (!credentials.username || !credentials.password) return error(res, 400, 'Login username and password are required.');
         const loginUrl = String(input.loginUrl || item.loginUrl || '').trim().slice(0, 1200);
-        if (loginUrl && !/^https?:\/\//i.test(loginUrl)) return error(res, 400, 'The login page URL must begin with http:// or https://.');
+        if (loginUrl) try { await assertPublicHttpUrl(loginUrl); } catch (cause) { return error(res, 400, cause.message); }
         const login = {
           url: item.url,
           loginUrl,
@@ -394,6 +421,20 @@ export async function handler(req, res) {
         await new VercelEpisodeSandbox(item.id, () => {}).login(login, credentials);
         await setExplainerFields(item.id, { ...login, browserPrepared: true, progress: 'Secure browser prepared', error: null });
         return json(res, 200, { ok: true });
+      }
+      if (parts[3] === 'desktop' && req.method === 'GET') {
+        if (item.status !== 'draft') return error(res, 409, 'The secure desktop is available while the explainer is a draft.');
+        const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
+        const liveUrl = await new VercelEpisodeSandbox(item.id, () => {}).interactiveDesktop(item.loginUrl || item.url);
+        if (!liveUrl) return error(res, 409, 'The visible Computer Use desktop is not configured.');
+        return json(res, 200, { liveUrl });
+      }
+      if (parts[3] === 'desktop-ready' && req.method === 'POST') {
+        if (item.status !== 'draft' || !item.authRequired) return error(res, 409, 'This explainer does not need manual browser preparation.');
+        const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
+        const screen = await new VercelEpisodeSandbox(item.id, () => {}).capture(null, item.url);
+        await setExplainerFields(item.id, { browserPrepared: true, manualDesktopPrepared: true, progress: 'Secure browser prepared', error: null });
+        return json(res, 200, { ok: true, screen: { title: screen.title, image: screen.image } });
       }
       if (parts[3] === 'start' && req.method === 'POST') {
         if (item.status !== 'draft') return error(res, 409, 'This explainer has already started.');

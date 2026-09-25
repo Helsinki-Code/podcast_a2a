@@ -14,8 +14,9 @@ const { runEpisode } = await import('../lib/engine.mjs');
 const { retrieve, buildIndex } = await import('../lib/rag.mjs');
 const { startSpeech, openLiveAudio } = await import('../lib/audio.mjs');
 const { demoLeadInComplete, ownContext, speechPhrases } = await import('../lib/conversation.mjs');
-const { buildCaptions, captionChunks, explainerCaptionFilter, explainerSceneBudget } = await import('../workflows/explainer-steps.mjs');
+const { buildCaptions, captionChunks, explainerCaptionFilter, explainerSceneBudget, actionFingerprint, actionIsCompatible } = await import('../workflows/explainer-steps.mjs');
 const { isSandboxNameConflict } = await import('../lib/vercel-sandbox.mjs');
+const { assertPublicHttpUrl, isPrivateAddress } = await import('../lib/url-security.mjs');
 await store.initStore();
 
 test('retrieval returns only relevant source chunks', () => {
@@ -28,6 +29,28 @@ test('sandbox name conflicts are recognized for safe resume', () => {
   assert.equal(isSandboxNameConflict({ statusCode: 400, message: "A sandbox with the name 'podcast-id' already exists for this project." }), true);
   assert.equal(isSandboxNameConflict(new Error("Status code 400 is not ok: A sandbox with the name 'podcast-id' already exists for this project.")), true);
   assert.equal(isSandboxNameConflict({ statusCode: 500, message: 'Sandbox creation failed.' }), false);
+});
+
+test('browser targets reject local and private network addresses', async () => {
+  assert.equal(isPrivateAddress('127.0.0.1'), true);
+  assert.equal(isPrivateAddress('169.254.169.254'), true);
+  assert.equal(isPrivateAddress('10.20.30.40'), true);
+  assert.equal(await assertPublicHttpUrl('https://example.com/path', { resolve: false }), 'https://example.com/path');
+  await assert.rejects(assertPublicHttpUrl('http://localhost:3000', { resolve: false }), /Private network/);
+  await assert.rejects(assertPublicHttpUrl('http://169.254.169.254/latest/meta-data', { resolve: false }), /Private network/);
+});
+
+test('computer use actions validate screenshot coordinates', () => {
+  const prior = process.env.COMPUTER_USE_SNAPSHOT_ID;
+  process.env.COMPUTER_USE_SNAPSHOT_ID = 'snap_test';
+  try {
+    assert.equal(actionIsCompatible({ type: 'click', x: 640, y: 420 }, {}), true);
+    assert.equal(actionIsCompatible({ type: 'type', x: 640, y: 420, text: 'Visible input' }, {}), true);
+    assert.equal(actionIsCompatible({ type: 'click', x: 2500, y: 420 }, {}), false);
+    assert.equal(actionIsCompatible({ type: 'type', x: 640, y: 420, text: '' }, {}), false);
+  } finally {
+    if (prior == null) delete process.env.COMPUTER_USE_SNAPSHOT_ID; else process.env.COMPUTER_USE_SNAPSHOT_ID = prior;
+  }
 });
 
 test('AI Gateway explainer voices reject legacy selections before generation', () => {
@@ -52,9 +75,23 @@ test('subtitle styles are user selectable and podcast speech stays conversationa
   assert.match(explainerCaptionFilter('minimal'), /BorderStyle=1/);
   assert.match(explainerCaptionFilter('editorial'), /DejaVu Serif/);
   assert.match(explainerCaptionFilter('bold'), /Bold=1/);
+  const custom = explainerCaptionFilter({ style: 'editorial', font: 'mono', size: 27, textColor: '#ffcc00', backgroundColor: '#112233', position: 'top' });
+  assert.match(custom, /DejaVu Sans Mono/);
+  assert.match(custom, /FontSize=27/);
+  assert.match(custom, /Alignment=8/);
   const phrases = speechPhrases('This deliberately long sentence contains enough words to require several compact spoken phrases so the next voice can be prepared while the current phrase is still playing for the audience.');
   assert.ok(phrases.length >= 2);
   assert.ok(phrases.every(phrase => phrase.split(/\s+/).length <= 24));
+});
+
+test('explainer action history has stable fingerprints that prevent repeated scenes', () => {
+  assert.equal(actionFingerprint({ type: 'type', selector: '@e4', value: 'example.com' }), 'type:@e4:example.com');
+  assert.equal(actionFingerprint({ type: 'scroll', direction: 'down', amount: 400 }), actionFingerprint({ type: 'scroll', direction: 'down', amount: 900 }));
+  assert.notEqual(actionFingerprint({ type: 'click', selector: '@e1' }), actionFingerprint({ type: 'click', selector: '@e2' }));
+  const screen = { content: '- heading "Overview" [level=1, ref=e1]\n- link "Campaigns" [ref=e2]\n- textbox "Website" [ref=e3]' };
+  assert.equal(actionIsCompatible({ type: 'click', selector: '@e1' }, screen), false);
+  assert.equal(actionIsCompatible({ type: 'click', selector: '@e2' }, screen), true);
+  assert.equal(actionIsCompatible({ type: 'type', selector: '@e3', value: 'example.com' }, screen), true);
 });
 
 test('explainer scene budget follows the requested brief instead of a fixed scene count', async () => {
@@ -89,10 +126,11 @@ test('restart copies production inputs into a clean attempt without reusing outp
   assert.equal(episode.video, undefined);
   assert.equal(episode.creditsCharged, undefined);
   assert.equal(episode.demoPrepared, false);
-  const explainer = await store.copyExplainerForRestart({ id: 'old-explainer', ownerId: 'owner', createdAt: 'old', status: 'complete', title: 'Same explainer', url: 'https://example.com', brief: 'Show the same workflow again.', authRequired: true, browserPrepared: true, video: '/assets/old.mp4', creditsCharged: 30 });
+  const explainer = await store.copyExplainerForRestart({ id: 'old-explainer', ownerId: 'owner', createdAt: 'old', status: 'complete', title: 'Same explainer', url: 'https://example.com', brief: 'Show the same workflow again.', authRequired: true, browserPrepared: true, video: '/assets/old.mp4', actions: [{ type: 'click', selector: '@e1' }], creditsCharged: 30 });
   assert.equal(explainer.status, 'draft');
   assert.equal(explainer.title, 'Same explainer');
   assert.equal(explainer.video, undefined);
+  assert.equal(explainer.actions, undefined);
   assert.equal(explainer.creditsCharged, undefined);
   assert.equal(explainer.browserPrepared, false);
 });
