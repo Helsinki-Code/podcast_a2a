@@ -1,7 +1,7 @@
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const esc = text => String(text ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = { personas: [], episodes: [], explainers: [], config: null, account: null, clerk: null, current: null, eventSource: null, pollTimer: null, explainerPoll: null, recorder: null, recorderChunks: [], audioContext: null, audioElement: null, sandboxAudioElement: null, sandboxPlaying: false, analyser: null, audioDestination: null, queue: [], playing: false, screen: { type: 'idle', title: 'The stage is ready', content: '' }, speaker: null, caption: '', amplitude: 0, startTime: 0, hostImage: null, guestImage: null, screenImage: null, ended: false, seen: new Set(), credentials: new Map(), localVideoUrl: null };
+const state = { personas: [], episodes: [], explainers: [], config: null, account: null, clerk: null, current: null, eventSource: null, pollTimer: null, explainerPoll: null, recorder: null, recorderChunks: [], audioContext: null, audioElement: null, sandboxAudioElement: null, sandboxPlaying: false, pendingSandboxAudio: null, audioUnlock: null, analyser: null, audioDestination: null, queue: [], playing: false, screen: { type: 'idle', title: 'The stage is ready', content: '' }, speaker: null, caption: '', amplitude: 0, startTime: 0, hostImage: null, guestImage: null, screenImage: null, ended: false, seen: new Set(), credentials: new Map(), localVideoUrl: null, mediaCancels: new Map() };
 
 async function api(path, options = {}) {
   const token = await state.clerk?.session?.getToken().catch(() => null);
@@ -25,8 +25,8 @@ function render() {
   $('#recentEpisodes').innerHTML = state.episodes.length ? state.episodes.slice(0, 3).map(epCard).join('') : '<div class="empty"><strong>No episodes yet</strong>Choose two personas and start your first recording.</div>';
   $('#recentPersonas').innerHTML = state.personas.length ? state.personas.slice(0, 6).map(p => `<div class="persona-chip">${avatar(p)}${esc(p.name)}</div>`).join('') : '<div class="empty">Your cast starts with a persona.</div>';
   $('#personaGrid').innerHTML = state.personas.length ? state.personas.map(p => `<article class="persona-card">${avatar(p,true)}<h3>${esc(p.name)}</h3><p>${esc(p.systemPrompt)}</p><div class="persona-card-foot"><span>${p.knowledge?.length || 0} knowledge files · ${esc(p.voice)}</span><button data-edit="${p.id}">Edit →</button></div></article>`).join('') : '<div class="empty"><strong>No personas yet</strong>Create a host and a guest to begin.</div>';
-  $('#episodeList').innerHTML = state.episodes.length ? state.episodes.map(e => `<article class="episode-row" data-episode="${e.id}" role="button" tabindex="0"><div><div class="eyebrow">${shortDate(e.createdAt)}</div><h3>${esc(e.outline.subject)}</h3><p>${esc(episodePerson(e,'host')?.name || 'Host')} × ${esc(episodePerson(e,'guest')?.name || 'Guest')} · ${e.turns?.length || 0} spoken segments</p></div><div class="episode-row-right"><span class="tag ${esc(e.status)}">${esc(e.status)}</span><span class="card-arrow">↗</span></div></article>`).join('') : '<div class="empty"><strong>Nothing recorded yet</strong>Create an episode to start the archive.</div>';
-  $('#explainerList').innerHTML = state.explainers.length ? state.explainers.map(e => `<article class="episode-row explainer-row"><div><div class="eyebrow">${shortDate(e.createdAt)} · ${esc(new URL(e.url).hostname)}</div><h3>${esc(e.title)}</h3><p>${esc(e.progress || e.brief)}</p></div><div class="episode-row-right"><span class="tag ${esc(e.status)}">${esc(e.status)}</span>${e.video ? `<a class="row-download" href="${esc(e.video)}" download>Download MP4</a><a class="row-download secondary" href="${esc(e.captions)}" download>Captions</a>` : ''}${e.status === 'draft' && e.authRequired ? `<button class="row-action" data-retry-explainer="${esc(e.id)}">Resume secure sign-in</button>` : ''}${e.error ? `<small class="row-error">${esc(e.error)}</small>` : ''}</div></article>`).join('') : '<div class="empty"><strong>No explainers yet</strong>Give the agent a URL and the workflow your customer needs to understand.</div>';
+  $('#episodeList').innerHTML = state.episodes.length ? state.episodes.map(e => `<article class="episode-row" data-episode="${e.id}" role="button" tabindex="0"><div><div class="eyebrow">${shortDate(e.createdAt)}</div><h3>${esc(e.outline.subject)}</h3><p>${esc(episodePerson(e,'host')?.name || 'Host')} × ${esc(episodePerson(e,'guest')?.name || 'Guest')} · ${e.turns?.length || 0} spoken segments</p></div><div class="episode-row-right"><span class="tag ${esc(e.status)}">${esc(e.status)}</span>${e.video || e.mp4 ? `<a class="row-download" href="${esc(e.mp4 || e.video)}" download>Download video</a>` : ''}${['complete','stopped','failed','interrupted'].includes(e.status) ? `<button class="row-action" data-restart-episode="${esc(e.id)}">Restart · 20 credits</button>` : ''}<span class="card-arrow">↗</span></div></article>`).join('') : '<div class="empty"><strong>Nothing recorded yet</strong>Create an episode to start the archive.</div>';
+  $('#explainerList').innerHTML = state.explainers.length ? state.explainers.map(e => `<article class="episode-row explainer-row"><div><div class="eyebrow">${shortDate(e.createdAt)} · ${esc(new URL(e.url).hostname)}</div><h3>${esc(e.title)}</h3><p>${esc(e.progress || e.brief)}</p></div><div class="episode-row-right"><span class="tag ${esc(e.status)}">${esc(e.status)}</span>${e.video ? `<a class="row-download" href="${esc(e.video)}" download>Download MP4</a><a class="row-download secondary" href="${esc(e.captions)}" download>Captions</a>` : ''}${e.status === 'draft' && e.authRequired ? `<button class="row-action" data-retry-explainer="${esc(e.id)}">Resume secure sign-in</button>` : ''}${['complete','failed'].includes(e.status) ? `<button class="row-action" data-restart-explainer="${esc(e.id)}">Restart · 30 credits</button>` : ''}${e.error ? `<small class="row-error">${esc(e.error)}</small>` : ''}</div></article>`).join('') : '<div class="empty"><strong>No explainers yet</strong>Give the agent a URL and the workflow your customer needs to understand.</div>';
   renderAccount();
 }
 
@@ -123,12 +123,14 @@ async function openStudio(id) {
   if (state.localVideoUrl) { URL.revokeObjectURL(state.localVideoUrl); state.localVideoUrl = null; }
   state.current = await api(`/api/episodes/${id}`);
   state.current.turns = [];
-  state.screen = { type: 'idle', title: 'The stage is ready', content: '' }; state.screenImage = null; state.speaker = null; state.caption = ''; state.amplitude = 0; state.queue = []; state.playing = false; state.seen = new Set(); state.ended = ['complete','stopped','failed','interrupted'].includes(state.current.status);
+  state.screen = { type: 'idle', title: 'The stage is ready', content: '' }; state.screenImage = null; state.speaker = null; state.caption = ''; state.amplitude = 0; state.queue = []; state.playing = false; state.sandboxPlaying = false; state.pendingSandboxAudio = null; state.seen = new Set(); state.ended = ['complete','stopped','failed','interrupted'].includes(state.current.status);
   state.hostImage = await loadImage(episodePerson(state.current,'host')?.image); state.guestImage = await loadImage(episodePerson(state.current,'guest')?.image);
   $('#studioTitle').textContent = state.current.outline.subject;
   $('#studioMeta').textContent = `${episodePerson(state.current,'host')?.name || 'Host'} × ${episodePerson(state.current,'guest')?.name || 'Guest'} · ${shortDate(state.current.createdAt)}`;
   $('#transcriptPane').innerHTML = ''; $('#activityPane').innerHTML = '';
   $('#startEpisode').classList.toggle('hidden', state.current.status !== 'draft');
+  $('#enableAudio').classList.add('hidden');
+  $('#restartEpisode').classList.toggle('hidden', !['complete','stopped','failed','interrupted'].includes(state.current.status));
   $('#stopEpisode').classList.toggle('hidden', !['running','preparing'].includes(state.current.status));
   setStatus(state.current.status);
   renderDownloads(); navigate('studio');
@@ -155,7 +157,7 @@ async function pollEpisode(id) {
   }
   if (state.current?.id === id && !state.ended) state.pollTimer = setTimeout(() => pollEpisode(id), 1000);
 }
-function setStatus(status) { $('#liveStatus').textContent = status.toUpperCase(); $('#liveStatus').className = `pill ${status}`; $('#stopEpisode').classList.toggle('hidden', !['running','preparing'].includes(status)); }
+function setStatus(status) { $('#liveStatus').textContent = status.toUpperCase(); $('#liveStatus').className = `pill ${status}`; $('#stopEpisode').classList.toggle('hidden', !['running','preparing'].includes(status)); $('#restartEpisode').classList.toggle('hidden', !['complete','stopped','failed','interrupted'].includes(status)); }
 function renderDownloads() {
   const e = state.current; const transcript = new Blob([e.turns.map(t => `${t.role.toUpperCase()}: ${t.text}`).join('\n\n')], { type: 'text/plain' });
   const transcriptUrl = URL.createObjectURL(transcript);
@@ -195,13 +197,14 @@ function processEvent(event, history = false) {
   }
   if (event.type === 'tool_start') { appendActivity(`Started ${event.tool}`, JSON.stringify(event.input).slice(0, 350)); state.screen = { type: 'working', title: `${event.tool} in progress`, content: 'Live sandbox activity…' }; }
   if (event.type === 'tool_output') { state.screen = event.screen || { type: 'terminal', title: event.tool, content: event.chunk }; }
-  if (event.type === 'tool_end') { state.screen = event.screen; appendActivity(`${event.tool} finished`, event.screen?.content?.slice(0, 500), event.screen?.asset || event.screen?.image); if (event.screen?.image) loadImage(event.screen.image).then(img => { state.screenImage = img; drawStage(); }); if (!history && event.screen?.audio && state.sandboxAudioElement) { state.sandboxPlaying = true; state.sandboxAudioElement.src = event.screen.audio; state.sandboxAudioElement.play().catch(error => { state.sandboxPlaying = false; notice(`Sandbox sound failed: ${error.message}`); maybeFinish(); }); } }
+  if (event.type === 'tool_end') { state.screen = event.screen; appendActivity(`${event.tool} finished`, event.screen?.content?.slice(0, 500), event.screen?.asset || event.screen?.image); if (event.screen?.image) loadImage(event.screen.image).then(img => { state.screenImage = img; drawStage(); }); if (!history && event.screen?.audio) playSandboxAudio(event.screen.audio); }
   if (event.type === 'interrupt') appendActivity(`${event.by} interjected`, event.reason);
   if (event.type === 'notice') appendActivity('Note', event.message);
   drawStage();
 }
-async function startRecording() {
-  const e = state.current; const canvas = $('#stage'); canvas.width = e.settings.width; canvas.height = e.settings.height;
+const SILENT_AUDIO = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+function initializeAudioGraph() {
+  if (state.audioContext && state.audioElement && state.sandboxAudioElement) return;
   state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
   state.audioDestination = state.audioContext.createMediaStreamDestination();
   state.analyser = state.audioContext.createAnalyser(); state.analyser.fftSize = 256;
@@ -212,6 +215,57 @@ async function startRecording() {
   state.sandboxAudioElement.onended = () => { state.sandboxPlaying = false; maybeFinish(); };
   const sandboxSource = state.audioContext.createMediaElementSource(state.sandboxAudioElement);
   sandboxSource.connect(state.audioDestination); sandboxSource.connect(state.audioContext.destination);
+}
+function unlockAudio() {
+  initializeAudioGraph();
+  const attempts = [];
+  if (state.audioContext.state === 'suspended') attempts.push(state.audioContext.resume());
+  for (const element of [state.audioElement, state.sandboxAudioElement]) {
+    element.src = SILENT_AUDIO;
+    const attempt = element.play();
+    attempts.push(Promise.resolve(attempt).then(() => { element.pause(); element.removeAttribute('src'); element.load(); }));
+  }
+  state.audioUnlock = Promise.allSettled(attempts);
+  return state.audioUnlock;
+}
+function playbackBlocked(error) {
+  return error?.name === 'NotAllowedError' || /not allowed|user agent|permission|autoplay/i.test(error?.message || String(error));
+}
+function showAudioGate() {
+  $('#enableAudio').classList.remove('hidden');
+  notice('The browser paused audio. Click Enable audio to continue the recording.');
+}
+function playToEnd(element, url) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { element.removeEventListener('ended', ended); element.removeEventListener('error', failed); state.mediaCancels.delete(element); };
+    const ended = () => { cleanup(); resolve(); };
+    const failed = () => { const error = element.error || new Error('The audio file could not be played.'); cleanup(); reject(error); };
+    state.mediaCancels.set(element, () => { cleanup(); reject(new DOMException('Playback stopped.', 'AbortError')); });
+    element.addEventListener('ended', ended, { once: true });
+    element.addEventListener('error', failed, { once: true });
+    element.src = url;
+    Promise.resolve(element.play()).catch(error => { cleanup(); reject(error); });
+  });
+}
+async function playSandboxAudio(url) {
+  initializeAudioGraph();
+  state.sandboxPlaying = true;
+  try {
+    await playToEnd(state.sandboxAudioElement, url);
+    state.pendingSandboxAudio = null;
+  } catch (error) {
+    state.sandboxPlaying = false;
+    if (state.ended && error?.name === 'AbortError') return;
+    if (playbackBlocked(error)) { state.pendingSandboxAudio = url; showAudioGate(); return; }
+    notice(`Sandbox sound failed: ${error.message || error}`);
+  }
+  state.sandboxPlaying = false; maybeFinish();
+}
+async function startRecording() {
+  const e = state.current; const canvas = $('#stage'); canvas.width = e.settings.width; canvas.height = e.settings.height;
+  initializeAudioGraph();
+  if (state.audioUnlock) await state.audioUnlock;
+  if (state.audioContext.state === 'suspended') await state.audioContext.resume();
   const stream = new MediaStream([...canvas.captureStream(30).getTracks(), ...state.audioDestination.stream.getTracks()]);
   const mime = ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'].find(x => MediaRecorder.isTypeSupported(x));
   state.recorderChunks = []; state.recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 5_000_000 });
@@ -247,14 +301,36 @@ async function playQueue() {
   while (state.queue.length) {
     const event = state.queue.shift(); state.speaker = event.role; state.caption = event.text;
     try {
-      state.audioElement.src = event.audio;
-      await state.audioElement.play();
-      await new Promise((resolve, reject) => { state.audioElement.onended = resolve; state.audioElement.onerror = reject; });
-    } catch (error) { notice(`Audio playback failed: ${error.message || error}`); }
+      await playToEnd(state.audioElement, event.audio);
+    } catch (error) {
+      if (state.ended && error?.name === 'AbortError') { state.playing = false; state.speaker = null; state.caption = ''; state.amplitude = 0; drawStage(); return; }
+      if (playbackBlocked(error)) {
+        state.queue.unshift(event); state.playing = false; state.speaker = null; state.caption = ''; state.amplitude = 0; showAudioGate(); drawStage(); return;
+      }
+      notice(`Audio playback failed: ${error.message || error}`);
+    }
     state.speaker = null; state.caption = ''; state.amplitude = 0;
     try { await api(`/api/episodes/${state.current.id}/ack`, { method: 'POST', body: JSON.stringify({ eventId: event.id }) }); } catch (error) { notice(error.message); }
   }
   state.playing = false; maybeFinish();
+}
+function stopLocalPlayback() {
+  state.ended = true; state.queue = []; state.pendingSandboxAudio = null; state.playing = false; state.sandboxPlaying = false;
+  for (const [element, cancel] of state.mediaCancels) { cancel(); element.pause(); element.removeAttribute('src'); element.load(); }
+  state.mediaCancels.clear(); state.speaker = null; state.caption = ''; state.amplitude = 0; $('#enableAudio').classList.add('hidden'); drawStage();
+}
+async function restartPodcast(id) {
+  const audioUnlock = unlockAudio();
+  const restarted = await api(`/api/episodes/${id}/restart`, { method: 'POST' });
+  await refreshMe(); await refresh(); await openStudio(restarted.id); await audioUnlock;
+  $('#startEpisode').click();
+}
+async function restartExplainer(id) {
+  const restarted = await api(`/api/explainers/${id}/restart`, { method: 'POST' });
+  await refreshMe(); await refresh();
+  if (restarted.authRequired) { openExplainerDialog(restarted); notice('Enter the credentials again to restart this explainer.'); return; }
+  await api(`/api/explainers/${restarted.id}/start`, { method: 'POST' });
+  await refreshMe(); await refresh(); navigate('explainers'); scheduleExplainerPoll(); notice('The explainer restarted with the same brief.', true);
 }
 function loadImage(url) { return new Promise(resolve => { if (!url) return resolve(null); const img = new Image(); img.onload = () => resolve(img); img.onerror = () => resolve(null); img.src = url; }); }
 function rounded(ctx,x,y,w,h,r){ctx.beginPath();ctx.roundRect(x,y,w,h,r)}
@@ -382,13 +458,16 @@ $('#speechProvider').addEventListener('change',()=>{updateVoiceSuggestions();$('
 $('#episodeForm').elements.interjectProbability.addEventListener('input',event=>{$('#interjectValue').textContent=`${event.target.value}%`});
 $('#episodeForm').elements.paneWidth.addEventListener('input',event=>{$('#paneValue').textContent=`${event.target.value}%`});
 $('#episodeForm').elements.authRequired.addEventListener('change',event=>{$('#episodeCredentials').classList.toggle('hidden',!event.target.checked);for(const name of ['demoUsername','demoPassword'])$('#episodeForm').elements[name].required=event.target.checked});
-document.addEventListener('click',event=>{const ep=event.target.closest('[data-episode]');if(ep)openStudio(ep.dataset.episode).catch(e=>notice(e.message));const edit=event.target.closest('button[data-edit]');if(edit)openPersona(person(edit.dataset.edit))});
+document.addEventListener('click',event=>{const ep=event.target.closest('[data-episode]');if(ep&&!event.target.closest('button,a'))openStudio(ep.dataset.episode).catch(e=>notice(e.message));const edit=event.target.closest('button[data-edit]');if(edit)openPersona(person(edit.dataset.edit))});
 document.addEventListener('click', event => { const retry = event.target.closest('[data-retry-explainer]'); if (retry) openExplainerDialog(state.explainers.find(item => item.id === retry.dataset.retryExplainer)); });
+document.addEventListener('click', event => { const podcast = event.target.closest('[data-restart-episode]'); if (podcast) restartPodcast(podcast.dataset.restartEpisode).catch(error => notice(error.message)); const explainer = event.target.closest('[data-restart-explainer]'); if (explainer) restartExplainer(explainer.dataset.restartExplainer).catch(error => notice(error.message)); });
 $('#backToEpisodes').addEventListener('click',()=>navigate('episodes'));
 $('#fullscreenStage').addEventListener('click',()=>$('#stage').requestFullscreen());
 $$('.side-tab').forEach(b=>b.addEventListener('click',()=>{$$('.side-tab').forEach(x=>x.classList.toggle('active',x===b));$('#transcriptPane').classList.toggle('hidden',b.dataset.side!=='transcript');$('#activityPane').classList.toggle('hidden',b.dataset.side!=='activity')}));
-$('#startEpisode').addEventListener('click',async()=>{const button=$('#startEpisode');try{for(const p of [episodePerson(state.current,'host'),episodePerson(state.current,'guest')]){if(!state.config.providers.ready.models[p.modelProvider||'gateway']||!state.config.providers.ready.speech[p.speechProvider||'gateway'])throw new Error(`Configure ${p.name}'s model and speech providers before starting.`)}const credentials=await credentialsForCurrentEpisode();if(state.current.settings.demo?.authRequired&&!credentials)return;button.disabled=true;button.textContent=credentials?'Signing in securely…':'Preparing…';if(credentials){await api(`/api/episodes/${state.current.id}/prepare`,{method:'POST',body:JSON.stringify({credentials})});state.credentials.delete(state.current.id)}await startRecording();button.classList.add('hidden');await api(`/api/episodes/${state.current.id}/start`,{method:'POST'});setStatus('preparing')}catch(error){notice(error.message);if(state.recorder?.state==='recording')state.recorder.stop()}finally{button.disabled=false;button.textContent='Start recording'}});
-$('#stopEpisode').addEventListener('click',async()=>{try{await api(`/api/episodes/${state.current.id}/stop`,{method:'POST'});notice('Stopping after the current segment.',true)}catch(error){notice(error.message)}});
+$('#startEpisode').addEventListener('click',async()=>{const button=$('#startEpisode');try{const audioUnlock=unlockAudio();for(const p of [episodePerson(state.current,'host'),episodePerson(state.current,'guest')]){if(!state.config.providers.ready.models[p.modelProvider||'gateway']||!state.config.providers.ready.speech[p.speechProvider||'gateway'])throw new Error(`Configure ${p.name}'s model and speech providers before starting.`)}const credentials=await credentialsForCurrentEpisode();if(state.current.settings.demo?.authRequired&&!credentials)return;button.disabled=true;button.textContent=credentials?'Signing in securely…':'Preparing…';if(credentials){await api(`/api/episodes/${state.current.id}/prepare`,{method:'POST',body:JSON.stringify({credentials})});state.credentials.delete(state.current.id)}await audioUnlock;await startRecording();button.classList.add('hidden');await api(`/api/episodes/${state.current.id}/start`,{method:'POST'});setStatus('preparing');await refreshMe()}catch(error){notice(error.message);if(state.recorder?.state==='recording')state.recorder.stop()}finally{button.disabled=false;button.textContent='Start recording'}});
+$('#enableAudio').addEventListener('click',async()=>{const button=$('#enableAudio');button.disabled=true;try{await unlockAudio();if(state.audioContext.state==='suspended')await state.audioContext.resume();button.classList.add('hidden');const pending=state.pendingSandboxAudio;state.pendingSandboxAudio=null;if(pending)playSandboxAudio(pending);playQueue()}catch(error){notice(`Audio could not be enabled: ${error.message || error}`)}finally{button.disabled=false}});
+$('#restartEpisode').addEventListener('click',()=>restartPodcast(state.current.id).catch(error=>notice(error.message)));
+$('#stopEpisode').addEventListener('click',async()=>{const button=$('#stopEpisode');button.disabled=true;try{await api(`/api/episodes/${state.current.id}/stop`,{method:'POST'});stopLocalPlayback();setStatus('stopped');await finishRecording();await refreshMe();await refresh();notice('Episode stopped. The video is ready below.',true)}catch(error){notice(error.message)}finally{button.disabled=false}});
 document.addEventListener('click', event => { const button = event.target.closest('[data-plan]'); if (!button) return; if (button.dataset.context === 'workspace') openPortal().catch(error => notice(error.message)); else checkout(button.dataset.plan).catch(error => notice(error.message)); });
 $('#signInButton').addEventListener('click',()=>state.clerk?.openSignIn({ redirectUrl: window.location.href }));
 $('#choosePlanButton').addEventListener('click',()=>$('#pricing').scrollIntoView({ behavior:'smooth' }));

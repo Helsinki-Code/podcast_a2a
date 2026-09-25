@@ -7,7 +7,7 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { initStore, listPersonas, listEpisodes, persona, episode, addPersona, updatePersona, deletePersona, addEpisode, putAsset, save, setEpisodeFields, acknowledgeEpisodeSpeech, assets, usesRemoteAssets, uid, stamp, account, reserveCredits, listExplainers, explainer, saveExplainer, setExplainerFields, assetOwnedBy } from './lib/store.mjs';
+import { initStore, listPersonas, listEpisodes, persona, episode, addPersona, updatePersona, deletePersona, addEpisode, putAsset, save, setEpisodeFields, acknowledgeEpisodeSpeech, assets, usesRemoteAssets, uid, stamp, account, reserveCredits, listExplainers, explainer, saveExplainer, setExplainerFields, assetOwnedBy, copyEpisodeForRestart, copyExplainerForRestart } from './lib/store.mjs';
 import { authenticate, primaryEmail } from './lib/auth.mjs';
 import { costs, createCheckout, createPortal, isPaid, processStripeWebhook, publicPlans } from './lib/billing.mjs';
 import { availableProviders } from './lib/providers.mjs';
@@ -252,6 +252,11 @@ export async function handler(req, res) {
         req.on('close', () => { clearInterval(heartbeat); listeners.get(item.id)?.delete(res); });
         return;
       }
+      if (parts[3] === 'restart' && req.method === 'POST') {
+        if (!['complete','stopped','failed','interrupted'].includes(item.status)) return error(res, 409, 'Stop or finish this episode before restarting it.');
+        const restarted = await copyEpisodeForRestart(item);
+        return json(res, 201, restarted);
+      }
       if (parts[3] === 'start' && req.method === 'POST') {
         if (item.status !== 'draft') return error(res, 409, 'Episode has already started.');
         if (item.settings.demo?.authRequired && !item.demoPrepared) return error(res, 409, 'Prepare the authenticated browser before recording.');
@@ -292,7 +297,7 @@ export async function handler(req, res) {
       }
       if (parts[3] === 'stop' && req.method === 'POST') {
         if (process.env.VERCEL) {
-          await setEpisodeFields(item.id, { stopRequested: true });
+          await setEpisodeFields(item.id, { stopRequested: true, status: 'stopped', endedAt: stamp() });
           const pending = [...item.events].reverse().find(event => event.type === 'speech' && !event.acknowledged);
           if (pending) {
             const { playbackHook, playbackToken } = await import('./workflows/episode.mjs');
@@ -353,6 +358,11 @@ export async function handler(req, res) {
       const item = await explainer(parts[2]);
       if (!item || item.ownerId !== auth.userId) return error(res, 404, 'Explainer not found');
       if (parts.length === 3 && req.method === 'GET') return json(res, 200, item);
+      if (parts[3] === 'restart' && req.method === 'POST') {
+        if (!['complete','failed'].includes(item.status)) return error(res, 409, 'Wait for this explainer to finish before restarting it.');
+        const restarted = await copyExplainerForRestart(item);
+        return json(res, 201, restarted);
+      }
       if (parts[3] === 'prepare' && req.method === 'POST') {
         if (item.status !== 'draft') return error(res, 409, 'Only a draft explainer can prepare its browser.');
         if (!item.authRequired) return json(res, 200, { ok: true });

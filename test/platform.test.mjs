@@ -13,7 +13,7 @@ const providers = await import('../lib/providers.mjs');
 const { runEpisode } = await import('../lib/engine.mjs');
 const { retrieve, buildIndex } = await import('../lib/rag.mjs');
 const { startSpeech, openLiveAudio } = await import('../lib/audio.mjs');
-const { ownContext } = await import('../lib/conversation.mjs');
+const { demoLeadInComplete, ownContext } = await import('../lib/conversation.mjs');
 await store.initStore();
 
 test('retrieval returns only relevant source chunks', () => {
@@ -23,12 +23,36 @@ test('retrieval returns only relevant source chunks', () => {
 });
 
 test('guest context requires a real browser demo without exposing login secrets', () => {
-  const episode = { outline: { subject: 'Platform overview', angle: 'private', points: '' }, turns: [], events: [], settings: { hostTools: false, requireGuestDemo: true, demo: { url: 'https://example.com/app', brief: 'Show the dashboard.', authRequired: true } } };
+  const episode = { outline: { subject: 'Platform overview', angle: 'private', points: '' }, turns: [{ role: 'host', text: 'Welcome.' }, { role: 'guest', text: 'Thanks.' }, { role: 'host', text: 'What problem does it solve?' }], events: [], settings: { hostTools: false, requireGuestDemo: true, demo: { url: 'https://example.com/app', brief: 'Show the dashboard.', authRequired: true } } };
   const messages = ownContext(episode, 'guest', { systemPrompt: 'Explain clearly.', knowledge: [] }, { type: 'browser', title: 'Dashboard', content: 'Overview' }, 'turn');
   const text = JSON.stringify(messages);
-  assert.match(text, /requires a real live computer demonstration/);
+  assert.equal(demoLeadInComplete(episode), true);
+  assert.match(text, /transition naturally into the required live computer demonstration/);
   assert.match(text, /https:\/\/example\.com\/app/);
   assert.doesNotMatch(text, /hunter2|secret@example\.com/i);
+});
+
+test('podcast opening keeps browser actions behind a two-way conversation lead-in', () => {
+  const episode = { outline: { subject: 'Platform overview', angle: '', points: '' }, turns: [{ role: 'host', text: 'Welcome to the show.' }], events: [], settings: { hostTools: false, requireGuestDemo: true, demo: { url: 'https://example.com/app', brief: 'Show the dashboard.' } } };
+  const text = JSON.stringify(ownContext(episode, 'guest', { systemPrompt: 'Explain clearly.', knowledge: [] }, { type: 'idle' }, 'turn'));
+  assert.equal(demoLeadInComplete(episode), false);
+  assert.match(text, /do not use the browser yet/);
+});
+
+test('restart copies production inputs into a clean attempt without reusing outputs or charges', async () => {
+  const episode = await store.copyEpisodeForRestart({ id: 'old-episode', ownerId: 'owner', createdAt: 'old', status: 'stopped', outline: { subject: 'Same show' }, settings: { demo: { url: 'https://example.com' } }, personas: { host: {}, guest: {} }, turns: [{ role: 'host', text: 'Old audio' }], events: [{ type: 'speech' }], video: '/assets/old.webm', creditsCharged: 20, demoPrepared: true });
+  assert.equal(episode.status, 'draft');
+  assert.equal(episode.outline.subject, 'Same show');
+  assert.deepEqual(episode.turns, []);
+  assert.equal(episode.video, undefined);
+  assert.equal(episode.creditsCharged, undefined);
+  assert.equal(episode.demoPrepared, false);
+  const explainer = await store.copyExplainerForRestart({ id: 'old-explainer', ownerId: 'owner', createdAt: 'old', status: 'complete', title: 'Same explainer', url: 'https://example.com', brief: 'Show the same workflow again.', authRequired: true, browserPrepared: true, video: '/assets/old.mp4', creditsCharged: 30 });
+  assert.equal(explainer.status, 'draft');
+  assert.equal(explainer.title, 'Same explainer');
+  assert.equal(explainer.video, undefined);
+  assert.equal(explainer.creditsCharged, undefined);
+  assert.equal(explainer.browserPrepared, false);
 });
 
 test('paid credits are granted once, debited once per job, and isolated by owner', async () => {

@@ -1,6 +1,6 @@
 import { defineHook, sleep } from 'workflow';
-import { speechPhrases } from '../lib/conversation.mjs';
-import { begin, snapshot, plan, speak, act, finish, emitInterruption, emitNotice, interjectionVerdict, expired, newEventId, prepareDemo } from './episode-steps.mjs';
+import { demoLeadInComplete, speechPhrases } from '../lib/conversation.mjs';
+import { begin, snapshot, plan, speak, act, finish, emitInterruption, emitNotice, interjectionVerdict, expired, newEventId } from './episode-steps.mjs';
 
 export const playbackHook = defineHook();
 export const playbackToken = (episodeId, eventId) => `podcast:${episodeId}:${eventId}`;
@@ -10,7 +10,7 @@ export async function episodeWorkflow(episodeId, launch = {}) {
   try {
     await begin(episodeId);
     let role = 'host';
-    let screen = launch.demo?.url ? await prepareDemo(episodeId, launch.demo, launch.prepared) : { type: 'idle', title: 'Sandbox ready', content: '' };
+    let screen = { type: 'idle', title: 'Conversation in progress', content: 'The browser demonstration will begin after the opening discussion.' };
     let actionsThisTurn = 0;
     let prefetched = null;
     let prefetchedRole = null;
@@ -22,7 +22,7 @@ export async function episodeWorkflow(episodeId, launch = {}) {
       prefetchedRole = null;
       const segments = Array.isArray(response.segments) ? response.segments.slice(0, 8) : [];
       const guestDemoDone = item.events?.some(event => event.type === 'tool_end' && event.role === 'guest' && event.tool === 'browser');
-      if (role === 'guest' && item.settings.requireGuestDemo && !guestDemoDone && !segments.some(segment => segment.type === 'act' && segment.tool === 'browser')) {
+      if (role === 'guest' && item.settings.requireGuestDemo && demoLeadInComplete(item) && !guestDemoDone && !segments.some(segment => segment.type === 'act' && segment.tool === 'browser')) {
         const fallback = item.settings.demo?.url || `https://www.google.com/search?q=${encodeURIComponent(item.outline.subject)}`;
         segments.push({ type: 'act', tool: 'browser', input: { action: 'visit', url: fallback } });
       }
@@ -67,6 +67,7 @@ export async function episodeWorkflow(episodeId, launch = {}) {
           if (role === 'host' && !current.settings.hostTools) continue;
           const name = String(segment.tool || '');
           if (!['code', 'browser', 'diagram', 'file', 'play_audio'].includes(name)) continue;
+          if (name === 'browser' && current.settings.requireGuestDemo && !demoLeadInComplete(current)) continue;
           screen = await act(episodeId, role, name, segment.input || {}, screen);
           actionsThisTurn++;
           if (actionsThisTurn < 6) replan = true;
