@@ -84,6 +84,59 @@ export function actionFingerprint(action = {}) {
   return `${type}:${String(action.selector || '')}:${String(action.value || action.key || '')}`;
 }
 
+const targetRoles = {
+  click: ['link','button','checkbox','radio','tab','menuitem','option'],
+  type: ['textbox','searchbox','input','textarea','combobox'],
+  select: ['combobox','listbox','option','select'],
+  press: ['button','textbox','searchbox','combobox','slider','spinbutton','tab']
+};
+const tagRoles = { a: 'link', button: 'button', input: 'textbox', textarea: 'textbox', select: 'combobox', option: 'option' };
+const rolesForAction = type => targetRoles[['double_click','right_click','drag'].includes(type) ? 'click' : type === 'fill' ? 'type' : type] || [];
+const normalizedName = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+function snapshotElements(screen = {}) {
+  return String(screen.content || '').split('\n').map(line => {
+    const ref = line.match(/\bref=(e\d+)\b/)?.[1];
+    const match = line.match(/^\s*-\s*([a-z]+)(?:\s+"((?:[^"\\]|\\.)*)")?/i);
+    return ref && match ? { ref, role: match[1].toLowerCase(), name: (match[2] || '').replace(/\\"/g, '"'), line: line.trim() } : null;
+  }).filter(Boolean);
+}
+
+export function compatibleTargets(type, screen = {}, limit = 12) {
+  const roles = rolesForAction(String(type || ''));
+  return snapshotElements(screen).filter(element => roles.includes(element.role) && !consequentialControl(element.line)).slice(0, limit).map(element => `@${element.ref} ${element.role} "${element.name}"`);
+}
+
+// Models sometimes answer with CSS, Playwright text selectors, or bare refs instead of the
+// @eN reference from the accessibility snapshot. Map those back onto the snapshot element.
+export function resolveActionTarget(action = {}, screen = {}) {
+  if (!action || typeof action !== 'object') return action;
+  const selector = String(action.selector || '').trim();
+  if (!selector || /^@e\d+$/.test(selector)) return action;
+  const bareRef = selector.match(/^(?:@|ref=|\[ref=)?(e\d+)\]?$/)?.[1];
+  const elements = snapshotElements(screen);
+  if (bareRef && elements.some(element => element.ref === bareRef)) return { ...action, selector: `@${bareRef}` };
+  const roles = rolesForAction(String(action.type || ''));
+  if (!roles.length) return action;
+  const names = [...selector.matchAll(/(?:aria-label|title|placeholder|name|value|alt)\s*[*^$~|]?=\s*(['"])(.*?)\1/gi)].map(match => match[2]);
+  names.push(...[...selector.matchAll(/(?:has-text|text|contains)\s*\(\s*(['"])(.*?)\1\s*\)/gi)].map(match => match[2]));
+  names.push(...[...selector.matchAll(/text\s*=\s*(['"]?)([^'"]+)\1/gi)].map(match => match[2]));
+  if (!names.length) names.push(...[...selector.matchAll(/(['"])(.+?)\1/g)].map(match => match[2]));
+  if (!names.length && !/[#.\[\]>:=()]/.test(selector)) names.push(selector);
+  const tag = selector.match(/^([a-z]+)(?=[\[.#:\s]|$)/i)?.[1]?.toLowerCase();
+  const explicitRole = selector.match(/role\s*=\s*['"]?([a-z]+)/i)?.[1]?.toLowerCase();
+  const preferredRole = explicitRole || tagRoles[tag];
+  const candidates = elements.filter(element => roles.includes(element.role));
+  const rank = element => (preferredRole && element.role === preferredRole ? 0 : 1);
+  for (const matches of [(element, name) => normalizedName(element.name) === name, (element, name) => normalizedName(element.name).includes(name)]) {
+    for (const name of names.map(normalizedName).filter(Boolean)) {
+      const found = candidates.filter(element => matches(element, name)).sort((a, b) => rank(a) - rank(b))[0];
+      if (found) return { ...action, selector: `@${found.ref}` };
+    }
+  }
+  return action;
+}
+
 export function actionIsCompatible(action = {}, screen = {}) {
   const type = String(action.type || 'wait');
   if (process.env.COMPUTER_USE_SNAPSHOT_ID) {
@@ -191,8 +244,8 @@ export async function planScene(id, directorState) {
   const provider = modelProviders.get('gateway');
   const computerUse = Boolean(process.env.COMPUTER_USE_SNAPSHOT_ID);
   const system = computerUse
-    ? `You direct a continuous product walkthrough by looking at a 1920x1080 screenshot and operating the visible desktop like a careful human. Return one JSON object with narration, action, and done. Actions: {"type":"click","selector":"@e2","x":500,"y":300}, {"type":"double_click","selector":"@e2","x":500,"y":300}, {"type":"right_click","selector":"@e2","x":500,"y":300}, {"type":"type","selector":"@e4","x":500,"y":300,"text":"visible demo value"}, {"type":"key","key":"Return"}, {"type":"scroll","direction":"down","amount":5}, {"type":"drag","x":400,"y":300,"endX":800,"endY":300}, {"type":"visit","url":"https://..."}, or {"type":"wait","ms":800}. Coordinates refer to the supplied screenshot. When the accessibility snapshot contains the intended web control, include its exact @e ref as selector and also provide the visible approximate coordinates. Use coordinates alone for canvas, remote desktop, or other targets without a ref. The screenshot is primary visual context; the ref anchors small targets reliably. Use an ordinary left click for web links, buttons, and controls. Use double click, right click, or drag only when the requested workflow explicitly requires that gesture. Every scene must advance the requested workflow or reveal a new part of the interface. Never repeat an action, screen, named section, typed field, or narration. After one scroll, interact with a newly visible control or finish. Prefer one safe reversible visible interaction in each scene. Keep narration between 12 and 28 words and introduce the action that happens during the sentence. Never delete, purchase, publish, send messages, change account settings, log out, or submit irreversible forms. Set done true as soon as the requested coverage is complete. Do not mention automation, coordinates, credentials, or that you are an AI.`
-    : `You direct a continuous, human-operated premium product walkthrough. Return one JSON object with narration, action, and done. The action is one of: {"type":"click","selector":"@e1"}, {"type":"type","selector":"@e1","value":"visible demo value"}, {"type":"select","selector":"@e1","value":"option value"}, {"type":"press","selector":"@e1","key":"ArrowRight"}, {"type":"scroll","direction":"down","amount":900}, {"type":"visit","url":"https://..."}, or {"type":"wait","ms":800}. Use only element refs visible in the current accessibility snapshot. Click only refs labeled link, button, checkbox, radio, tab, menuitem, or option. Type only into refs labeled textbox, searchbox, input, textarea, or combobox. Every scene must advance the requested workflow or reveal a new part of the interface. Never repeat any prior action, screen, named section, typed field, or narration. One scroll scene is enough to reveal a section; after scrolling, interact with a new visible control or set done true. Prefer one visible, reversible interaction in every scene; use wait only for the opening or final wrap-up. Use type rather than fill so real keystrokes appear in the recording. Keep narration between 12 and 28 words and time it as a human explanation of the action occurring now. Describe only what is visible or what this scene's action will visibly demonstrate. Stay read-only unless the user's brief explicitly requires a safe reversible submission: never delete, submit payments, change account settings, log out, send messages, or publish content. Set done true immediately after the requested workflow has been covered. Do not mention automation, selectors, credentials, or that you are an AI.`;
+    ? `You direct a continuous product walkthrough by looking at a 1920x1080 screenshot and operating the visible desktop like a careful human. Return one JSON object with narration, action, and done. Actions: {"type":"click","selector":"@e2","x":500,"y":300}, {"type":"double_click","selector":"@e2","x":500,"y":300}, {"type":"right_click","selector":"@e2","x":500,"y":300}, {"type":"type","selector":"@e4","x":500,"y":300,"text":"visible demo value"}, {"type":"key","key":"Return"}, {"type":"scroll","direction":"down","amount":5}, {"type":"drag","x":400,"y":300,"endX":800,"endY":300}, {"type":"visit","url":"https://..."}, or {"type":"wait","ms":800}. Coordinates refer to the supplied screenshot. When the accessibility snapshot contains the intended web control, include its exact @e ref as selector (never a CSS, XPath, or text selector) and also provide the visible approximate coordinates. Use coordinates alone for canvas, remote desktop, or other targets without a ref. The screenshot is primary visual context; the ref anchors small targets reliably. Use an ordinary left click for web links, buttons, and controls. Use double click, right click, or drag only when the requested workflow explicitly requires that gesture. Every scene must advance the requested workflow or reveal a new part of the interface. Never repeat an action, screen, named section, typed field, or narration. After one scroll, interact with a newly visible control or finish. Prefer one safe reversible visible interaction in each scene. Keep narration between 12 and 28 words and introduce the action that happens during the sentence. Never delete, purchase, publish, send messages, change account settings, log out, or submit irreversible forms. Set done true as soon as the requested coverage is complete. Do not mention automation, coordinates, credentials, or that you are an AI.`
+    : `You direct a continuous, human-operated premium product walkthrough. Return one JSON object with narration, action, and done. The action is one of: {"type":"click","selector":"@e1"}, {"type":"type","selector":"@e1","value":"visible demo value"}, {"type":"select","selector":"@e1","value":"option value"}, {"type":"press","selector":"@e1","key":"ArrowRight"}, {"type":"scroll","direction":"down","amount":900}, {"type":"visit","url":"https://..."}, or {"type":"wait","ms":800}. Use only element refs visible in the current accessibility snapshot, written exactly as @eN; never use CSS, XPath, or text selectors. Click only refs labeled link, button, checkbox, radio, tab, menuitem, or option. Type only into refs labeled textbox, searchbox, input, textarea, or combobox. Every scene must advance the requested workflow or reveal a new part of the interface. Never repeat any prior action, screen, named section, typed field, or narration. One scroll scene is enough to reveal a section; after scrolling, interact with a new visible control or set done true. Prefer one visible, reversible interaction in every scene; use wait only for the opening or final wrap-up. Use type rather than fill so real keystrokes appear in the recording. Keep narration between 12 and 28 words and time it as a human explanation of the action occurring now. Describe only what is visible or what this scene's action will visibly demonstrate. Stay read-only unless the user's brief explicitly requires a safe reversible submission: never delete, submit payments, change account settings, log out, send messages, or publish content. Set done true immediately after the requested workflow has been covered. Do not mention automation, selectors, credentials, or that you are an AI.`;
   const context = `Application: ${item.url}\nRequested coverage: ${item.brief}\nDirector state:\n${JSON.stringify(directorState)}\nChoose the next action from allowedActions. Use remainingMilestones to decide what the walkthrough still needs. Prioritize the first remaining milestone before optional exploration whenever the current screen can perform it. A milestone counts only after a recorded action visibly completes it.${directorState.scene.estimatedBudgetReached && directorState.remainingMilestones.length ? ` The next action must satisfy one of these remaining milestones: ${directorState.remainingMilestones.join(', ')}.` : ''} Set done true only when remainingMilestones is empty and this scene completes the requested coverage.`;
   const model = process.env.EXPLAINER_MODEL || 'google/gemini-3.1-flash-lite';
   const routing = { user: item.ownerId, tags: ['feature:explainer-director', `mode:${computerUse ? 'computer-use' : 'browser'}`] };

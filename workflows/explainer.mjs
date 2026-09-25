@@ -1,4 +1,4 @@
-import { beginExplainer, explainerSceneBudget, explainerRequirements, planScene, renderScene, finishExplainer, failExplainer, actionFingerprint, actionIsCompatible, explainerActionKind, buildExplainerDirectorState } from './explainer-steps.mjs';
+import { beginExplainer, explainerSceneBudget, explainerRequirements, planScene, renderScene, finishExplainer, failExplainer, actionFingerprint, actionIsCompatible, resolveActionTarget, compatibleTargets, explainerActionKind, buildExplainerDirectorState } from './explainer-steps.mjs';
 
 export async function explainerWorkflow(explainerId) {
   'use workflow';
@@ -19,12 +19,15 @@ export async function explainerWorkflow(explainerId) {
       for (let attempt = 0; attempt < 3; attempt++) {
         const directorState = buildExplainerDirectorState(requiredKinds, timeline, history, screen, index, sceneBudget);
         decision = await planScene(explainerId, directorState);
+        if (decision?.action) decision.action = resolveActionTarget(decision.action, screen);
         fingerprint = actionFingerprint(decision.action);
         const repeated = completedActions.includes(fingerprint);
         const missingKindRequiredNow = directorState.scene.estimatedBudgetReached && directorState.remainingMilestones.length && !directorState.remainingMilestones.includes(explainerActionKind(decision.action));
         if (missingKindRequiredNow) invalidReason = `The next scene must perform one of the remaining requested actions: ${directorState.remainingMilestones.join(', ')}.`;
-        else if (!actionIsCompatible(decision.action, screen)) invalidReason = `Invalid target for ${fingerprint}. Choose a visible interactive element of the correct type.`;
-        else if (repeated) invalidReason = `Repeated action ${fingerprint}. The prior scene already showed it. Choose a different visible interaction or finish only when every milestone is complete.`;
+        else if (!actionIsCompatible(decision.action, screen)) {
+          const targets = compatibleTargets(decision.action?.type, screen);
+          invalidReason = `Invalid target for ${fingerprint}. Use the exact @eN ref of a visible interactive element of the correct type${targets.length ? `, for example: ${targets.join('; ')}` : ''}.`;
+        } else if (repeated) invalidReason = `Repeated action ${fingerprint}. The prior scene already showed it. Choose a different visible interaction or finish only when every milestone is complete.`;
         else { invalidReason = ''; break; }
         history.push({ rejected: invalidReason });
       }

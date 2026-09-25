@@ -14,7 +14,8 @@ const { runEpisode } = await import('../lib/engine.mjs');
 const { retrieve, buildIndex } = await import('../lib/rag.mjs');
 const { startSpeech, openLiveAudio } = await import('../lib/audio.mjs');
 const { demoLeadInComplete, ownContext, speechBlocks, speechPhrases } = await import('../lib/conversation.mjs');
-const { buildCaptions, captionChunks, explainerCaptionFilter, explainerSceneBudget, requiredActionKinds, actionFingerprint, actionIsCompatible, buildExplainerDirectorState } = await import('../workflows/explainer-steps.mjs');
+const { buildCaptions, captionChunks, explainerCaptionFilter, explainerSceneBudget, requiredActionKinds, actionFingerprint, actionIsCompatible, resolveActionTarget, buildExplainerDirectorState } = await import('../workflows/explainer-steps.mjs');
+const { parseModelJson } = await import('../lib/model-json.mjs');
 const { isSandboxNameConflict } = await import('../lib/vercel-sandbox.mjs');
 const { parseProbeJson, parseSilenceLog, evaluateMediaQuality } = await import('../lib/media-quality.mjs');
 const { podcastTimeline, podcastCaptions } = await import('../lib/podcast-timeline.mjs');
@@ -103,6 +104,24 @@ test('explainer action history has stable fingerprints that prevent repeated sce
   assert.equal(actionIsCompatible({ type: 'click', selector: '@e9' }, consequential), false);
   assert.equal(actionIsCompatible({ type: 'click', selector: '@e10' }, consequential), true);
   assert.equal(actionIsCompatible({ type: 'click', x: 500, y: 400 }, consequential), false);
+});
+
+test('explainer maps CSS and text selectors from the director onto snapshot refs', () => {
+  const screen = { content: 'Newsletter\n- heading "Subscribe to our newsletter" [level=2, ref=e2]\n- textbox "Email" [ref=e3]\n- button "Subscribe" [ref=e4]\n- button "No thanks" [ref=e5]' };
+  for (const selector of ["button[aria-label='No thanks']", 'text="No thanks"', "button:has-text('No thanks')", 'No thanks', 'e5']) {
+    const action = resolveActionTarget({ type: 'click', selector }, screen);
+    assert.equal(action.selector, '@e5');
+    assert.equal(actionIsCompatible(action, screen), true);
+  }
+  assert.equal(resolveActionTarget({ type: 'type', selector: "input[placeholder='Email']", value: 'demo@example.com' }, screen).selector, '@e3');
+  assert.equal(resolveActionTarget({ type: 'click', selector: '#missing' }, screen).selector, '#missing');
+});
+
+test('model JSON salvage recovers fenced or wrapped plans and rejects non-objects', () => {
+  assert.deepEqual(parseModelJson('Here you go:\n```json\n{"segments":[{"type":"speak","text":"A {braced} line"}],"finish":false,}\n```'), { segments: [{ type: 'speak', text: 'A {braced} line' }], finish: false });
+  assert.deepEqual(parseModelJson('{"interrupt":false,"reason":"none"} trailing words'), { interrupt: false, reason: 'none' });
+  assert.equal(parseModelJson('{"segments": [{"type": "speak", "text": "cut off'), null);
+  assert.equal(parseModelJson('[1,2]'), null);
 });
 
 test('explainer scene budget follows the requested brief instead of a fixed scene count', async () => {
