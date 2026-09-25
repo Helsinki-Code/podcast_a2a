@@ -7,7 +7,7 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { initStore, listPersonas, listEpisodes, persona, episode, addPersona, updatePersona, deletePersona, addEpisode, putAsset, save, setEpisodeFields, acknowledgeEpisodeSpeech, assets, usesRemoteAssets, uid, stamp, account, reserveCredits, listExplainers, explainer, saveExplainer, setExplainerFields, assetOwnedBy, copyEpisodeForRestart, copyExplainerForRestart } from './lib/store.mjs';
+import { initStore, listPersonas, listEpisodes, persona, episode, episodeState, episodeEventsAfter, addPersona, updatePersona, deletePersona, addEpisode, putAsset, save, setEpisodeFields, acknowledgeEpisodeSpeech, assets, usesRemoteAssets, uid, stamp, account, reserveCredits, listExplainers, explainer, saveExplainer, setExplainerFields, assetOwnedBy, copyEpisodeForRestart, copyExplainerForRestart } from './lib/store.mjs';
 import { authenticate, primaryEmail } from './lib/auth.mjs';
 import { costs, createCheckout, createPortal, isPaid, processStripeWebhook, publicPlans } from './lib/billing.mjs';
 import { availableProviders, supportedVoice } from './lib/providers.mjs';
@@ -53,6 +53,16 @@ function waitForAck(id, eventId, isStopped) {
     const interval = setInterval(() => { if (isStopped()) { clearTimeout(timeout); clearInterval(interval); acknowledgements.delete(key); resolve(); } }, 500);
     acknowledgements.set(key, () => { clearTimeout(timeout); clearInterval(interval); acknowledgements.delete(key); resolve(); });
   });
+}
+async function launchEpisode(res, item) {
+  if (process.env.VERCEL) {
+    const [{ start }, { episodeWorkflow }] = await Promise.all([import('workflow/api'), import('./workflows/episode.mjs')]);
+    const run = await start(episodeWorkflow, [item.id]);
+    await setEpisodeFields(item.id, { workflowRunId: run.runId });
+    return json(res, 202, { ok: true, runId: run.runId });
+  }
+  json(res, 202, { ok: true });
+  setImmediate(async () => runEpisode(await episode(item.id), publish, waitForAck).catch(console.error));
 }
 async function cleanPersona(input) {
   const name = String(input.name || '').trim().slice(0, 80);
@@ -249,7 +259,8 @@ export async function handler(req, res) {
           background: validColor(input.settings?.background, '#101c24'),
           glowStrength: Math.max(.5, Math.min(1.8, Number(input.settings?.glowStrength) || 1)),
           paneWidth: Math.max(55, Math.min(72, Number(input.settings?.paneWidth) || 66)),
-          layout: ['balanced','stage'].includes(input.settings?.layout) ? input.settings.layout : 'balanced'
+          layout: ['balanced','stage'].includes(input.settings?.layout) ? input.settings.layout : 'balanced',
+          playbackMode: input.settings?.playbackMode === 'background' ? 'background' : 'live'
         }, turns: [], events: []
       };
       await addEpisode(item); return json(res, 201, item);
@@ -257,6 +268,13 @@ export async function handler(req, res) {
     if (parts[0] === 'api' && parts[1] === 'episodes' && parts[2]) {
       const item = await episode(parts[2]); if (!item || item.ownerId !== auth.userId) return error(res, 404, 'Episode not found');
       if (parts.length === 3 && req.method === 'GET') return json(res, 200, item);
+      // Incremental JSON feed: only events after the client's cursor, plus the fields the studio renders.
+      if (parts[3] === 'events' && req.method === 'GET' && url.searchParams.get('format') === 'json') {
+        const after = Number(url.searchParams.get('after')) || 0;
+        const events = await episodeEventsAfter(item.id, after);
+        const { turns, events: _events, personas: _personas, ...fields } = item;
+        return json(res, 200, { events, cursor: events.at(-1)?.seq || after, episode: fields });
+      }
       if (parts[3] === 'events' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
         res.write(': connected\n\n');
@@ -276,16 +294,38 @@ export async function handler(req, res) {
         if (item.status !== 'draft') return error(res, 409, 'Episode has already started.');
         if (item.settings.demo?.authRequired && !item.demoPrepared) return error(res, 409, 'Prepare the authenticated browser before recording.');
         if (!await reserveCredits(auth.userId, costs.podcast, 'podcast', item.id)) return error(res, 402, `This podcast needs ${costs.podcast} credits.`);
-        await setEpisodeFields(item.id, { status: 'preparing', stopRequested: false, creditsCharged: costs.podcast });
-        if (process.env.VERCEL) {
-          const [{ start }, { episodeWorkflow }] = await Promise.all([import('workflow/api'), import('./workflows/episode.mjs')]);
-          const run = await start(episodeWorkflow, [item.id, { demo: item.settings.demo || {}, prepared: !!item.demoPrepared }]);
-          await setEpisodeFields(item.id, { workflowRunId: run.runId });
-          return json(res, 202, { ok: true, runId: run.runId });
+        await setEpisodeFields(item.id, { status: 'preparing', stopRequested: false, creditsCharged: costs.podcast, creditReference: item.id, attempt: 1 });
+        return launchEpisode(res, item);
+      }
+      // Continue a failed or interrupted conversation from its last turn instead of starting over.
+      if (parts[3] === 'resume' && req.method === 'POST') {
+        if (!['failed','interrupted'].includes(item.status)) return error(res, 409, 'Only a failed or interrupted episode can be resumed.');
+        if (!item.turns?.length) return error(res, 409, 'Nothing was recorded yet. Restart the episode instead.');
+        if (item.settings.demo?.authRequired && !item.guestDemoDone) {
+          const input = await body(req, 12000);
+          const credentials = { username: String(input.credentials?.username || '').slice(0, 500), password: String(input.credentials?.password || '').slice(0, 2000) };
+          if (!credentials.username || !credentials.password) return error(res, 400, 'Sign in to the demo platform again so the guest can finish the demonstration.');
+          const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
+          await new VercelEpisodeSandbox(item.id, () => {}).login(item.settings.demo, credentials);
         }
-        json(res, 202, { ok: true });
-        setImmediate(() => runEpisode(item, publish, waitForAck));
-        return;
+        const attempt = (Number(item.attempt) || 1) + 1;
+        const reference = `${item.id}:attempt-${attempt}`;
+        if (!await reserveCredits(auth.userId, costs.podcast, 'podcast', reference)) return error(res, 402, `Resuming this podcast needs ${costs.podcast} credits.`);
+        await setEpisodeFields(item.id, { status: 'preparing', stopRequested: false, error: null, creditsCharged: costs.podcast, creditReference: reference, attempt, videoStatus: null, videoError: null });
+        return launchEpisode(res, item);
+      }
+      // Re-run only the MP4 assembly when the conversation finished but its video failed.
+      if (parts[3] === 'render' && req.method === 'POST') {
+        if (!['complete','stopped'].includes(item.status) || item.videoStatus !== 'failed') return error(res, 409, 'Only a finished episode whose video failed can be rendered again.');
+        if (!process.env.VERCEL) return error(res, 409, 'Local episodes are recorded in the browser; restart the episode to record a new take.');
+        const attempt = (Number(item.renderAttempt) || 0) + 1;
+        const reference = `${item.id}:render-${attempt}`;
+        if (!await reserveCredits(auth.userId, costs.podcast, 'podcast', reference)) return error(res, 402, `Rendering this podcast needs ${costs.podcast} credits.`);
+        await setEpisodeFields(item.id, { videoStatus: 'processing', videoError: null, creditsCharged: costs.podcast, creditReference: reference, renderAttempt: attempt });
+        const [{ start }, { podcastRenderWorkflow }] = await Promise.all([import('workflow/api'), import('./workflows/podcast-render.mjs')]);
+        const run = await start(podcastRenderWorkflow, [item.id]);
+        await setEpisodeFields(item.id, { videoWorkflowRunId: run.runId });
+        return json(res, 202, { ok: true, runId: run.runId });
       }
       if (parts[3] === 'prepare' && req.method === 'POST') {
         if (item.status !== 'draft') return error(res, 409, 'Only a draft episode can prepare its browser.');
@@ -334,7 +374,7 @@ export async function handler(req, res) {
           }
           return json(res, 200, { stopped: true });
         }
-        return json(res, 200, { stopped: stopEpisode(item.id) });
+        return json(res, 200, { stopped: await stopEpisode(item.id) });
       }
       if (parts[3] === 'video' && parts[4] === 'complete' && req.method === 'POST') {
         if (!usesRemoteAssets()) return error(res, 409, 'Direct Blob upload is not enabled.');

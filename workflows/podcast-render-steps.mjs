@@ -8,6 +8,11 @@ const extension = reference => /\.webp$/i.test(reference) ? 'webp' : /\.jpe?g$/i
 const html = value => String(value || '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const imageData = (bytes, reference) => bytes?.length ? `data:image/${extension(reference) === 'jpg' ? 'jpeg' : extension(reference)};base64,${bytes.toString('base64')}` : '';
 
+export function podcastOutputSpec(settings = {}) {
+  const fullHD = !(Number(settings.width) === 1280 && Number(settings.height) === 720);
+  return { width: fullHD ? 1920 : 1280, height: fullHD ? 1080 : 720, format: ['mp4', 'webm', 'both'].includes(settings.outputFormat) ? settings.outputFormat : 'both' };
+}
+
 async function optionalAsset(reference) {
   if (!reference) return null;
   try { return await readAssetBytes(reference); } catch { return null; }
@@ -95,24 +100,37 @@ export async function renderPodcastTimeline(episodeId) {
     if (captionsEnabled) await browser.writeSandboxFile('/tmp/podcast-burn.srt', podcastCaptions(timed, { speakerLabels: true, labelColors }));
     let result = await browser.run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', '/tmp/podcast-parts.txt', '-vf', 'fps=30,format=yuv420p', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '/tmp/podcast-base.mp4'], 20 * 60 * 1000);
     if (result.exitCode) throw new Error(`Could not assemble the podcast timeline: ${(await result.stderr()).slice(-1200)}`);
-    const finalArgs = ['-y', '-i', '/tmp/podcast-base.mp4', ...(captionsEnabled ? ['-vf', podcastCaptionFilter(settings.captionStyle)] : []), '-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', '/tmp/podcast-final.mp4'];
+    const { width, height, format } = podcastOutputSpec(settings);
+    const finalFilters = [...(captionsEnabled ? [podcastCaptionFilter(settings.captionStyle)] : []), ...(width !== 1920 ? [`scale=${width}:${height}:flags=lanczos`] : [])];
+    const finalArgs = ['-y', '-i', '/tmp/podcast-base.mp4', ...(finalFilters.length ? ['-vf', finalFilters.join(',')] : []), '-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', '/tmp/podcast-final.mp4'];
     result = await browser.run('ffmpeg', finalArgs, 20 * 60 * 1000);
     if (result.exitCode) throw new Error(`Could not burn podcast captions: ${(await result.stderr()).slice(-1200)}`);
     const quality = await inspectSandboxMedia(browser, '/tmp/podcast-final.mp4', { sceneThreshold: 0.008, silenceNoise: '-30dB', silenceDuration: .25 });
     const verdict = evaluateMediaQuality(quality, { interactive: Boolean(item.settings?.requireGuestDemo), minDuration: 4, maxSilencePercent: 15, maxSilenceSeconds: 1 });
     if (!verdict.passed) throw new Error(`Podcast quality check failed: ${verdict.failures.join(' ')}`);
+    let webm = null, webmError = null;
+    if (format !== 'mp4') {
+      // VP9 in realtime mode keeps the WebM pass short; the MP4 stays the quality-checked master.
+      const encoded = await browser.run('ffmpeg', ['-y', '-i', '/tmp/podcast-final.mp4', '-c:v', 'libvpx-vp9', '-deadline', 'realtime', '-cpu-used', '8', '-row-mt', '1', '-b:v', '0', '-crf', '32', '-c:a', 'libopus', '-b:a', '128k', '/tmp/podcast-final.webm'], 20 * 60 * 1000);
+      if (encoded.exitCode) webmError = `WebM export failed: ${(await encoded.stderr()).slice(-600)}`;
+      else webm = await putNamedAsset(`episode-${safe(episodeId)}.webm`, await browser.readSandboxFile('/tmp/podcast-final.webm'));
+    }
     const [video, captions] = await Promise.all([browser.readSandboxFile('/tmp/podcast-final.mp4'), browser.readSandboxFile('/tmp/podcast.srt')]);
     const [mp4, captionUrl] = await Promise.all([putNamedAsset(`episode-${safe(episodeId)}.mp4`, video), putNamedAsset(`episode-${safe(episodeId)}.srt`, captions)]);
-    await setEpisodeFields(episodeId, { mp4, captions: captionUrl, videoStatus: 'complete', videoError: null, quality, renderedAt: stamp() });
+    // A WebM-only request still keeps the MP4 when the WebM encode fails, rather than delivering nothing.
+    await setEpisodeFields(episodeId, { mp4, ...(webm ? { video: webm } : {}), captions: captionUrl, videoStatus: 'complete', videoError: webmError, quality, renderedAt: stamp(), output: { width, height, format } });
     return mp4;
   } finally {
     await browser.close().catch(() => {});
   }
 }
 
+// A render failure keeps the recorded conversation (so the MP4 can be retried) but refunds the charge,
+// because no finished video was delivered.
 export async function failPodcastRender(episodeId, message) {
   'use step';
   const item = await episode(episodeId);
-  if (item?.creditsCharged && item.ownerId) await refundCredits(item.ownerId, item.creditsCharged, 'podcast', episodeId);
-  await setEpisodeFields(episodeId, { status: 'failed', videoStatus: 'failed', videoError: String(message || 'Podcast rendering failed.').slice(0, 2000), error: String(message || 'Podcast rendering failed.').slice(0, 2000), endedAt: stamp() });
+  if (item?.creditsCharged && item.ownerId) await refundCredits(item.ownerId, item.creditsCharged, 'podcast', item.creditReference || episodeId);
+  const reason = String(message || 'Podcast rendering failed.').slice(0, 2000);
+  await setEpisodeFields(episodeId, { videoStatus: 'failed', videoError: reason, creditsCharged: 0, ...(item?.endedAt ? {} : { endedAt: stamp() }) });
 }

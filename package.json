@@ -8,7 +8,7 @@
     "build": "npm run build:client && next build --webpack",
     "start": "next start",
     "dev": "next dev",
-    "test": "NODE_ENV=test node --test"
+    "test": "NODE_ENV=test node --test --experimental-test-module-mocks"
   },
   "dependencies": {
     "@agent-browser/sandbox": "^0.38.1",
@@ -28,5 +28,8 @@
     "react-dom": "^19.3.0",
     "stripe": "^22.6.2",
     "workflow": "^4.8.9"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8"
   }
 }
