@@ -1,3 +1,5 @@
+import { timedSubtitleCues, cueAt } from './captions.js';
+
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const esc = text => String(text ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -359,7 +361,7 @@ function waitForTail(element, leadSeconds = .28) {
 }
 async function playSpeechEvent(event) {
   const element = state.speechElements[event.role] || state.speechElements.host;
-  state.audioElement = element; state.speaker = event.role; state.caption = event.text;
+  state.audioElement = element; state.speaker = event.role; state.caption = event.text; state.captionCues = timedSubtitleCues(event.text, 1); state.captionElement = element; state.captionStarted = performance.now();
   const playback = playToEnd(element, event.audio);
   try { await api(`/api/episodes/${state.current.id}/ack`, { method: 'POST', body: JSON.stringify({ eventId: event.id }) }); } catch (error) { notice(error.message); }
   await waitForTail(element);
@@ -408,7 +410,9 @@ function loadImage(url) { return new Promise(resolve => { if (!url) return resol
 function rounded(ctx,x,y,w,h,r){ctx.beginPath();ctx.roundRect(x,y,w,h,r)}
 function wrap(ctx,text,x,y,maxWidth,lineHeight,maxLines=12){const words=String(text||'').split(/\s+/);let line='',count=0;for(const word of words){const test=line ? `${line} ${word}` : word;if(ctx.measureText(test).width>maxWidth && line){ctx.fillText(line,x,y+count*lineHeight);count++;line=word;if(count>=maxLines)break}else line=test}if(count<maxLines)ctx.fillText(line,x,y+count*lineHeight);return count+1}
 function captionLines(ctx,text,maxWidth,maxLines=3){const words=String(text||'').split(/\s+/),lines=[];let line='';for(const word of words){const next=line?`${line} ${word}`:word;if(ctx.measureText(next).width>maxWidth&&line){lines.push(line);line=word;if(lines.length===maxLines-1)break}else line=next}if(line&&lines.length<maxLines)lines.push(line);return lines}
-function drawCaption(ctx){if(!state.caption)return;ctx.save();const style=state.current?.settings?.captionStyle||'studio';ctx.textAlign='center';ctx.font=style==='bold'?'800 31px Arial':style==='minimal'?'600 26px Arial':'600 25px Arial';const lines=captionLines(ctx,state.caption,style==='bold'?920:1000,2);const lineHeight=style==='bold'?39:34,boxHeight=lines.length*lineHeight+26,y=650-boxHeight;if(style==='studio'){ctx.fillStyle='#061013dc';rounded(ctx,110,y,1060,boxHeight,12);ctx.fill()}ctx.lineJoin='round';ctx.lineWidth=style==='bold'?8:style==='minimal'?5:0;ctx.strokeStyle='#061013';ctx.fillStyle=style==='bold'?'#80ded1':'#f4faf7';lines.forEach((line,index)=>{const yy=y+31+index*lineHeight;if(ctx.lineWidth)ctx.strokeText(line,640,yy);ctx.fillText(line,640,yy)});ctx.restore()}
+// Advance through phrase cues as the speech audio plays; cues are timed on a 0–1 scale of the clip.
+function liveCaptionText(){if(!state.captionCues?.length)return state.caption;const element=state.captionElement,duration=element?.duration;const progress=Number.isFinite(duration)&&duration>0?element.currentTime/duration:Math.min(.999,(performance.now()-state.captionStarted)/1000/Math.max(1.5,state.caption.split(/\s+/).length/2.6));return cueAt(state.captionCues,progress)?.text||''}
+function drawCaption(ctx){if(!state.caption)return;const text=liveCaptionText();if(!text)return;ctx.save();const style=state.current?.settings?.captionStyle||'studio';ctx.textAlign='center';ctx.font=style==='bold'?'800 31px Arial':style==='minimal'?'600 26px Arial':'600 25px Arial';const lines=captionLines(ctx,text,style==='bold'?920:1000,2);const lineHeight=style==='bold'?39:34,boxHeight=lines.length*lineHeight+26,y=650-boxHeight;if(style==='studio'){ctx.fillStyle='#061013dc';rounded(ctx,110,y,1060,boxHeight,12);ctx.fill()}ctx.lineJoin='round';ctx.lineWidth=style==='bold'?8:style==='minimal'?5:0;ctx.strokeStyle='#061013';ctx.fillStyle=style==='bold'?'#80ded1':'#f4faf7';lines.forEach((line,index)=>{const yy=y+31+index*lineHeight;if(ctx.lineWidth)ctx.strokeText(line,640,yy);ctx.fillText(line,640,yy)});ctx.restore()}
 function drawStage() {
   const canvas=$('#stage'),ctx=canvas.getContext('2d');if(!ctx)return;const W=canvas.width,H=canvas.height,s=W/1280;ctx.save();ctx.scale(s,s);const bg=state.current?.settings.background||'#101c24',accent=state.current?.settings.accent||'#80ded1';ctx.fillStyle=bg;ctx.fillRect(0,0,1280,720);
   const gradient=ctx.createRadialGradient(640,350,10,640,350,800);gradient.addColorStop(0,'#26545044');gradient.addColorStop(1,'#00000000');ctx.fillStyle=gradient;ctx.fillRect(0,0,1280,720);
