@@ -45,7 +45,7 @@ export async function handler(req, res) {
     if (parts[0] === 'public' && req.method === 'GET') return staticFile(req, res, path.join(here, 'public'), parts.slice(1).join('/'));
     if (url.pathname === '/api/config' && req.method === 'GET') {
       const providers = availableProviders();
-      return json(res, 200, { brand: 'The Sales Forge', clerkPublishableKey: process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || '', plans: publicPlans(), costs, providers, storage: { remoteAssets: usesRemoteAssets() }, realtime: process.env.VERCEL ? 'poll' : 'sse', ready: { model: Object.values(providers.ready.models).some(Boolean), sandbox: !!(process.env.VERCEL || process.env.VERCEL_OIDC_TOKEN || process.env.VERCEL_TOKEN) }, environment: environmentReport() });
+      return json(res, 200, { brand: 'The Sales Forge', clerkPublishableKey: process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || '', plans: publicPlans(), costs, providers, storage: { remoteAssets: usesRemoteAssets() }, realtime: process.env.VERCEL ? 'poll' : 'sse', demoVideoUrl: /^https:\/\//.test(process.env.PUBLIC_DEMO_VIDEO_URL || '') ? process.env.PUBLIC_DEMO_VIDEO_URL : '', ready: { model: Object.values(providers.ready.models).some(Boolean), sandbox: !!(process.env.VERCEL || process.env.VERCEL_OIDC_TOKEN || process.env.VERCEL_TOKEN) }, environment: environmentReport() });
     }
     await ensureInitialized();
     if (url.pathname === '/api/webhooks/stripe' && req.method === 'POST') {
