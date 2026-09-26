@@ -121,6 +121,10 @@
     <div class="dialog-scroll"><label>Brand name<input name="name" maxlength="80" placeholder="Acme Analytics"></label><div class="form-row"><label>Logo <span class="hint">PNG, JPEG, WebP or SVG · under 2 MB</span><input name="logoFile" type="file" accept=".png,.jpg,.jpeg,.webp,.svg,image/*"></label><div id="brandLogoPreview" class="image-preview">No logo</div></div><div class="form-row"><label>Primary color<input name="primaryColor" type="color" value="#101c24"></label><label>Accent color<input name="accentColor" type="color" value="#80ded1"></label></div><label>Outro headline<input name="outroText" maxlength="120" placeholder="Thanks for watching"></label><label>Call to action<input name="callToAction" maxlength="120" placeholder="Start your free trial at acme.com"></label></div>
     <div class="dialog-actions"><button type="button" class="button button-ghost close-dialog">Cancel</button><button type="submit" class="button button-primary">Save brand kit</button></div>
   </form></dialog>
+  <dialog id="publishDialog" class="dialog dialog-wide"><form id="publishForm" method="dialog">
+    <div class="dialog-head"><div><div class="eyebrow">PUBLISH</div><h2 id="publishTitle">Publish</h2></div><button type="button" class="icon-button close-dialog" aria-label="Close">×</button></div>
+    <div class="dialog-scroll" id="publishBody"></div>
+  </form></dialog>
   <script src="/public/clerk.bundle.js"></script>
   <script src="/public/blob-upload.bundle.js"></script>
   <script type="module" src="/public/app.js"></script>
