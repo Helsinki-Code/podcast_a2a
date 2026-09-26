@@ -254,3 +254,7 @@ a.back{display:inline-block;font-size:13px;text-decoration:none;margin-bottom:18
 
 /* Publish dialog: keep helper copy at body-small size. */
 .publish-section .hint,.publish-section p{font-size:13px;line-height:1.5;margin:0 0 10px}
+
+/* Expandable raw error text under friendly error messages. */
+.error-details{margin-top:4px;font-weight:400}
+.error-details summary{cursor:pointer;font-size:11px;text-decoration:underline}

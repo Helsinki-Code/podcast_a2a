@@ -4,6 +4,7 @@ import { episodeState, appendEpisodeEvent, setEpisodeFields, stamp, uid, putName
 import { modelProviders, speechProviders, supportedVoice } from '../lib/providers.mjs';
 import { ownContext, transcriptForPrompt } from '../lib/conversation.mjs';
 import { retrieveHybrid } from '../lib/rag-semantic.mjs';
+import { loopView } from '../lib/conversation-loop.mjs';
 import { DEFAULT_VOICES, isGuestRole } from '../lib/cast.mjs';
 import { modelFor } from '../lib/models.mjs';
 import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';
@@ -20,7 +21,7 @@ export async function begin(episodeId) {
 }
 export async function snapshot(episodeId) {
   'use step';
-  return episodeState(episodeId);
+  return loopView(await episodeState(episodeId));
 }
 export async function newEventId() {
   'use step';

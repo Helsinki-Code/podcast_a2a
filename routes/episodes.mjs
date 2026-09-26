@@ -1,4 +1,4 @@
-import { listEpisodes, persona, episode, episodeEventsAfter, addEpisode, save, setEpisodeFields, acknowledgeEpisodeSpeech, assets, usesRemoteAssets, uid, stamp, reserveCredits, copyEpisodeForRestart, deleteEpisode } from '../lib/store.mjs';
+import { listEpisodes, persona, episode, episodeState, episodeEventsAfter, addEpisode, save, setEpisodeFields, acknowledgeEpisodeSpeech, assets, usesRemoteAssets, uid, stamp, reserveCredits, copyEpisodeForRestart, deleteEpisode } from '../lib/store.mjs';
 import path from 'node:path';
 import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -8,7 +8,10 @@ import { stopEpisode } from '../lib/engine.mjs';
 import { CAST_ROLES, DEFAULT_VOICES, DEFAULT_ACCENTS } from '../lib/cast.mjs';
 import { assertPublicHttpUrl } from '../lib/url-security.mjs';
 import { json, error, body } from '../lib/http.mjs';
-import { listeners, acknowledgements, transcode, launchEpisode } from './live.mjs';
+import { listeners, acknowledgements, transcode, launchEpisode, reconcileEpisodeRun } from './live.mjs';
+
+// Persona knowledge and embeddings can be megabytes each; the studio and lists only show names.
+const slimPersonas = (personas = {}) => Object.fromEntries(Object.entries(personas).map(([role, { knowledge, knowledgeIndex: _index, knowledgeSignature: _signature, ...rest }]) => [role, { ...rest, knowledge: (knowledge || []).map(file => ({ name: file.name, source: file.source })) }]));
 
 export async function handle({ req, res, url, parts, auth, userAccount }) {
   if (parts[0] === 'api' && parts[1] === 'episodes' && parts[2] && parts.length === 3 && req.method === 'DELETE') {
@@ -17,7 +20,7 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
     if (['running','preparing'].includes(item.status) || item.videoStatus === 'processing') return error(res, 409, 'Stop it or wait for it to finish before deleting it.');
     return json(res, 200, { ok: true, filesRemoved: await deleteEpisode(item.id) });
   }
-  if (url.pathname === '/api/episodes' && req.method === 'GET') return json(res, 200, (await listEpisodes(auth.userId)).map(({ events, ...rest }) => rest));
+  if (url.pathname === '/api/episodes' && req.method === 'GET') return json(res, 200, (await listEpisodes(auth.userId)).map(({ events: _events, ...rest }) => ({ ...rest, personas: slimPersonas(rest.personas) })));
   if (url.pathname === '/api/episodes' && req.method === 'POST') {
     const input = await body(req);
     // Cast: host + guest are required; co-host and up to two more guests are optional.
@@ -107,13 +110,16 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
     await addEpisode(item); return json(res, 201, item);
   }
   if (parts[0] === 'api' && parts[1] === 'episodes' && parts[2]) {
-    const item = await episode(parts[2]); if (!item || item.ownerId !== auth.userId) return error(res, 404, 'Episode not found');
-    if (parts.length === 3 && req.method === 'GET') return json(res, 200, item);
+    // The live feed polls every second or so: read the episode without its event log.
+    const liveFeed = parts[3] === 'events' && req.method === 'GET' && url.searchParams.get('format') === 'json';
+    const item = liveFeed ? await episodeState(parts[2]) : await episode(parts[2]); if (!item || item.ownerId !== auth.userId) return error(res, 404, 'Episode not found');
+    if (parts.length === 3 && req.method === 'GET') return json(res, 200, { ...item, personas: slimPersonas(item.personas) });
     // Incremental JSON feed: only events after the client's cursor, plus the fields the studio renders.
     if (parts[3] === 'events' && req.method === 'GET' && url.searchParams.get('format') === 'json') {
       const after = Number(url.searchParams.get('after')) || 0;
+      const current = await reconcileEpisodeRun(item) ? await episodeState(item.id) : item;
       const events = await episodeEventsAfter(item.id, after);
-      const { turns: _turns, events: _events, personas: _personas, ...fields } = item;
+      const { turns: _turns, events: _events, personas: _personas, ...fields } = current;
       return json(res, 200, { events, cursor: events.at(-1)?.seq || after, episode: fields });
     }
     if (parts[3] === 'events' && req.method === 'GET') {

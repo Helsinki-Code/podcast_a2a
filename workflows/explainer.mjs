@@ -1,4 +1,4 @@
-import { beginExplainer, explainerSceneBudget, explainerRequirements, planScene, renderScene, finishExplainer, failExplainer, draftExplainerPlan, failExplainerPlan, rerenderExplainer, failExplainerRerender, actionFingerprint, actionIsCompatible, resolveActionTarget, compatibleTargets, explainerActionKind, buildExplainerDirectorState } from './explainer-steps.mjs';
+import { beginExplainer, explainerSceneBudget, explainerRequirements, planScene, renderScene, finishExplainer, failExplainer, draftExplainerPlan, failExplainerPlan, rerenderExplainer, failExplainerRerender, actionFingerprint, actionIsCompatible, resolveActionTarget, fallbackSceneAction, compatibleTargets, explainerActionKind, buildExplainerDirectorState } from './explainer-steps.mjs';
 
 export async function explainerWorkflow(explainerId) {
   'use workflow';
@@ -12,10 +12,13 @@ export async function explainerWorkflow(explainerId) {
     const safetyLimit = Math.min(30, Math.max(sceneBudget + 8, sceneBudget * 2));
     let index = 0;
     let done = false;
+    let consecutiveFallbacks = 0;
+    let milestoneNudged = false;
     while (!done && index < safetyLimit) {
       let decision;
       let fingerprint;
       let invalidReason = '';
+      let acceptable = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         const directorState = buildExplainerDirectorState(requiredKinds, timeline, history, screen, index, sceneBudget);
         decision = await planScene(explainerId, directorState);
@@ -23,7 +26,9 @@ export async function explainerWorkflow(explainerId) {
         fingerprint = actionFingerprint(decision.action);
         const repeated = completedActions.includes(fingerprint);
         const missingKindRequiredNow = directorState.scene.estimatedBudgetReached && directorState.remainingMilestones.length && !directorState.remainingMilestones.includes(explainerActionKind(decision.action));
-        if (missingKindRequiredNow) invalidReason = `The next scene must perform one of the remaining requested actions: ${directorState.remainingMilestones.join(', ')}.`;
+        const usable = actionIsCompatible(decision.action, screen) && !repeated;
+        if (usable && !acceptable) acceptable = { decision, fingerprint };
+        if (missingKindRequiredNow && usable) invalidReason = `The next scene should perform one of the remaining requested actions: ${directorState.remainingMilestones.join(', ')}.`;
         else if (!actionIsCompatible(decision.action, screen)) {
           const targets = compatibleTargets(decision.action?.type, screen);
           invalidReason = `Invalid target for ${fingerprint}. Use the exact @eN ref of a visible interactive element of the correct type${targets.length ? `, for example: ${targets.join('; ')}` : ''}.`;
@@ -31,12 +36,24 @@ export async function explainerWorkflow(explainerId) {
         else { invalidReason = ''; break; }
         history.push({ rejected: invalidReason });
       }
-      const narration = String(decision.narration || '').trim();
-      if (!narration) {
-        if (decision.done) break;
-        throw new Error('The explainer agent returned an empty scene.');
+      // Milestones are guidance: a valid action that skips one is better than a failed video.
+      if (invalidReason && acceptable) {
+        ({ decision, fingerprint } = acceptable);
+        invalidReason = '';
       }
-      if (invalidReason || !actionIsCompatible(decision.action, screen) || completedActions.includes(fingerprint)) throw new Error(`The explainer director could not choose a new compatible action after three replans: ${invalidReason || fingerprint}`);
+      let narration = String(decision?.narration || '').trim();
+      if (!narration && (decision?.done || timeline.length)) break;
+      if (!narration) throw new Error('The explainer agent returned an empty scene.');
+      if (invalidReason) {
+        // Three replans failed: keep the narration and show something safe instead of failing the video.
+        consecutiveFallbacks++;
+        if (consecutiveFallbacks > 2 && timeline.length >= 2) break;
+        const fallback = fallbackSceneAction(screen, completedActions);
+        history.push({ rejected: `Replaced with ${actionFingerprint(fallback)} after three invalid choices: ${invalidReason}` });
+        decision = { ...decision, action: fallback, done: false };
+        fingerprint = actionFingerprint(fallback);
+        if (fallback.type === 'scroll') narration = narration || 'Let us look further down the page.';
+      } else consecutiveFallbacks = 0;
       const before = screen;
       const action = decision.action || { type: 'wait' };
       const result = await renderScene(explainerId, index, narration, action);
@@ -47,8 +64,7 @@ export async function explainerWorkflow(explainerId) {
       screen = result.screen;
       if (!screenChanged && !['wait','key'].includes(action.type)) {
         history.push({ rejected: `The ${fingerprint} scene did not visibly change the desktop and was omitted from the finished video.` });
-        const completedKinds = new Set(timeline.map(part => explainerActionKind(part.action)));
-        done = decision.done === true && requiredKinds.every(kind => completedKinds.has(kind));
+        done = decision.done === true && timeline.length > 0;
         index++;
         continue;
       }
@@ -58,7 +74,9 @@ export async function explainerWorkflow(explainerId) {
       if (done) {
         const kinds = new Set(timeline.map(part => explainerActionKind(part.action)));
         const missing = requiredKinds.filter(kind => !kinds.has(kind));
-        if (missing.length) {
+        // Ask for the missing milestones once; if the director still says done, respect it.
+        if (missing.length && !milestoneNudged) {
+          milestoneNudged = true;
           done = false;
           history.push({ rejected: `The walkthrough cannot finish yet. The brief still requires: ${missing.join(', ')}.` });
         }
@@ -66,10 +84,7 @@ export async function explainerWorkflow(explainerId) {
       index++;
     }
     if (!timeline.length) throw new Error('The explainer agent produced no scenes.');
-    const completedKinds = new Set(timeline.map(part => explainerActionKind(part.action)));
-    const missingKinds = requiredKinds.filter(kind => !completedKinds.has(kind));
-    if (missingKinds.length) throw new Error(`The requested walkthrough is missing recorded actions: ${missingKinds.join(', ')}.`);
-    if (!done) throw new Error(`The requested walkthrough was incomplete after the ${safetyLimit}-scene safety limit.`);
+    // Missing milestones or hitting the scene limit still yields a video of what was recorded.
     const interactive = timeline.filter(part => !['wait'].includes(part.action?.type));
     if (!interactive.length) throw new Error('The explainer completed without a real browser interaction.');
     if (!interactive.some(part => part.usedScreenshotFallback !== true)) throw new Error('The explainer contains no valid live browser recording.');

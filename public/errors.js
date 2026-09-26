@@ -11,7 +11,8 @@ const rules = [
   [/compatible action|Invalid target|walkthrough|milestone/i, 'The browser agent got stuck on the page', 'Make the workflow brief more specific (name the buttons or pages to visit), then retry.'],
   [/frozen|silence|quality check|MP4|render|ffmpeg|captions/i, 'The finished video failed its quality check', 'Retry the render. Your recorded conversation is kept and you are not charged twice.'],
   [/sandbox|desktop|Computer Use/i, 'The recording computer had a problem', 'Retry. If it repeats, the recording environment may be busy; wait a few minutes.'],
-  [/too short|too long|fragment/i, 'An AI answer didn’t meet the length rules', 'Resume the episode; the guest will be asked to answer again.']
+  [/too short|too long|fragment/i, 'An AI answer didn’t meet the length rules', 'Resume the episode; the guest will be asked to answer again.'],
+  [/recording workflow/i, 'The recording stopped unexpectedly', 'Resume the episode to continue from the last line; unused credits were refunded.']
 ];
 
 export function friendlyError(message) {

@@ -135,6 +135,7 @@ test('explainer scene budget follows the requested brief instead of a fixed scen
 test('explainer completion requirements follow interaction verbs in the brief', () => {
   assert.deepEqual(requiredActionKinds('Open New Campaign, enter a website, then scroll through the results.'), ['scroll', 'type', 'navigate']);
   assert.deepEqual(requiredActionKinds('Explain the visible dashboard without interacting.'), []);
+  assert.deepEqual(requiredActionKinds('Enter the dashboard and review the charts.'), []);
 });
 
 test('explainer director receives structured live milestone state', () => {
