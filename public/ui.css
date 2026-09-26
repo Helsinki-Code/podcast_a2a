@@ -251,3 +251,6 @@ a.back{display:inline-block;font-size:13px;text-decoration:none;margin-bottom:18
 .settings-card > .button,.settings-card > .segmented,.settings-card > button{justify-self:start}
 .suggest-row .hint,.dialog label > .hint{font-size:11px}
 .wizard-steps{flex:none}.look-preview .hint{font-size:12px}
+
+/* Publish dialog: keep helper copy at body-small size. */
+.publish-section .hint,.publish-section p{font-size:13px;line-height:1.5;margin:0 0 10px}

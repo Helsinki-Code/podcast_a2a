@@ -22,7 +22,7 @@ function youtubeSection(item) {
   const meta = item.youtube || {};
   const upload = item.youtubeUpload || {};
   const yt = ctx.integrations?.youtube || {};
-  const action = !yt.configured ? '<p class="hint">YouTube upload is not configured on this workspace. Copy the title and description below.</p>'
+  const action = !yt.configured ? '<p class="hint">YouTube upload is not configured on this workspace. Copy the title and description above into YouTube Studio.</p>'
     : !yt.connected ? '<button type="button" class="button button-ghost small" data-publish="connect-youtube">Connect YouTube</button>'
     : upload.status === 'uploading' ? '<span class="hint">Uploading to YouTube…</span>'
     : `<div class="form-row"><label>Visibility<select name="privacy"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select></label><button type="button" class="button button-primary small" data-publish="youtube">${upload.status === 'complete' ? 'Upload again' : `Upload to ${esc(yt.channel?.title || 'YouTube')}`}</button></div>`;
