@@ -24,6 +24,25 @@ test('fallback scene action picks an unused safe link, then scrolls', () => {
   assert.equal(real.fallbackSceneAction(screen, ['click:@e2:', 'click:@e4:', 'scroll:down', 'scroll:down', 'scroll:down']).direction, 'up');
 });
 
+test('fallback scene action uses safe refs when Computer Use is enabled', () => {
+  const previous = process.env.COMPUTER_USE_SNAPSHOT_ID;
+  process.env.COMPUTER_USE_SNAPSHOT_ID = 'snapshot-test';
+  try {
+    assert.deepEqual(real.fallbackSceneAction({ title: 'Dashboard', content }, []), { type: 'click', selector: '@e2' });
+  } finally {
+    if (previous === undefined) delete process.env.COMPUTER_USE_SNAPSHOT_ID;
+    else process.env.COMPUTER_USE_SNAPSHOT_ID = previous;
+  }
+});
+
+test('director state replaces stale overlay controls with the post-dismissal screen', () => {
+  const stale = real.buildExplainerDirectorState([], [], [], { title: 'Popup', content: '- button "No thanks" [ref=e9]' }, 0, 4);
+  const fresh = real.directorStateWithScreen(stale, { title: 'Dashboard', content: '- link "Reports" [ref=e4]' });
+  assert.equal(fresh.currentScreen.title, 'Dashboard');
+  assert.match(fresh.currentScreen.accessibility, /Reports/);
+  assert.doesNotMatch(fresh.currentScreen.accessibility, /No thanks/);
+});
+
 test('the workflow snapshot leaves out persona knowledge, embeddings, and the event log', () => {
   const view = loopView({
     id: 'e1', status: 'running', settings: { maxMinutes: 10 }, outline: { subject: 'CRM', points: ['a'] },

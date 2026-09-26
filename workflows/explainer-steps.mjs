@@ -13,6 +13,7 @@ const safeName = value => String(value).replace(/[^a-zA-Z0-9._-]/g, '_');
 const srtText = text => String(text).replace(/\r?\n/g, ' ').replace(/<[^>]+>/g, '');
 const consequentialControl = value => /\b(?:launch(?:\s+sending|\s+campaign)?|send(?:\s+now)?|approve\s+all|purchase|pay|subscribe|delete|remove|publish|post|archive|stop\s+campaign|clear\s+failures|retry\s+send)\b/i.test(String(value || ''));
 const validHex = (value, fallback) => /^#[0-9a-f]{6}$/i.test(value || '') ? value : fallback;
+const subtitleFilename = value => String(value || '').replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'");
 const assColor = (hex, alpha = '00') => {
   const value = validHex(hex, '#ffffff').slice(1);
   return `&H${alpha}${value.slice(4, 6)}${value.slice(2, 4)}${value.slice(0, 2)}`;
@@ -25,7 +26,7 @@ export function explainerCaptionFilter(input = 'studio', subtitlePath = '/tmp/ca
     editorial: 'FontName=DejaVu Serif,FontSize=17,PrimaryColour=&H00FFFFFF,OutlineColour=&H85000000,BackColour=&H85000000,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=58',
     bold: 'FontName=DejaVu Sans,FontSize=23,Bold=1,PrimaryColour=&H0019E6FF,OutlineColour=&H00101010,BackColour=&H40000000,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=48'
   };
-  if (!options.font && !options.size && !options.textColor && !options.backgroundColor && !options.position) return `subtitles=${subtitlePath}:force_style='${styles[options.style] || styles.studio}'`;
+  if (!options.font && !options.size && !options.textColor && !options.backgroundColor && !options.position) return `subtitles=filename='${subtitleFilename(subtitlePath)}':force_style='${styles[options.style] || styles.studio}'`;
   const fonts = { sans: 'DejaVu Sans', serif: 'DejaVu Serif', mono: 'DejaVu Sans Mono' };
   const alignment = { bottom: 2, center: 5, top: 8 }[options.position] || 2;
   const margin = alignment === 2 ? 52 : alignment === 8 ? 48 : 0;
@@ -35,7 +36,7 @@ export function explainerCaptionFilter(input = 'studio', subtitlePath = '/tmp/ca
   const borderStyle = options.style === 'minimal' || options.style === 'bold' ? 1 : 3;
   const outline = options.style === 'bold' ? 3 : options.style === 'minimal' ? 2 : 1;
   const bold = options.style === 'bold' ? 1 : 0;
-  return `subtitles=${subtitlePath}:force_style='FontName=${fonts[options.font] || fonts.sans},FontSize=${fontSize},Bold=${bold},PrimaryColour=${primary},OutlineColour=&H00101010,BackColour=${background},BorderStyle=${borderStyle},Outline=${outline},Shadow=0,Alignment=${alignment},MarginV=${margin}'`;
+  return `subtitles=filename='${subtitleFilename(subtitlePath)}':force_style='FontName=${fonts[options.font] || fonts.sans},FontSize=${fontSize},Bold=${bold},PrimaryColour=${primary},OutlineColour=&H00101010,BackColour=${background},BorderStyle=${borderStyle},Outline=${outline},Shadow=0,Alignment=${alignment},MarginV=${margin}'`;
 }
 function srtTime(seconds) {
   const ms = Math.round(seconds * 1000);
@@ -216,15 +217,13 @@ export async function explainerSceneBudget(id) {
 // Used when the director cannot produce a valid action: the first unused, non-destructive link or
 // button on screen, else a scroll so the viewer still sees more of the page.
 export function fallbackSceneAction(screen = {}, completedActions = []) {
-  if (!process.env.COMPUTER_USE_SNAPSHOT_ID) {
-    const preferred = ['link', 'tab', 'menuitem', 'button'];
-    const candidates = snapshotElements(screen)
-      .filter(element => preferred.includes(element.role) && element.name && !consequentialControl(element.line))
-      .sort((a, b) => preferred.indexOf(a.role) - preferred.indexOf(b.role));
-    for (const element of candidates) {
-      const action = { type: 'click', selector: `@${element.ref}` };
-      if (!completedActions.includes(actionFingerprint(action)) && actionIsCompatible(action, screen)) return action;
-    }
+  const preferred = ['link', 'tab', 'menuitem', 'button'];
+  const candidates = snapshotElements(screen)
+    .filter(element => preferred.includes(element.role) && element.name && !consequentialControl(element.line))
+    .sort((a, b) => preferred.indexOf(a.role) - preferred.indexOf(b.role));
+  for (const element of candidates) {
+    const action = { type: 'click', selector: `@${element.ref}` };
+    if (!completedActions.includes(actionFingerprint(action)) && actionIsCompatible(action, screen)) return action;
   }
   const downs = completedActions.filter(fingerprint => fingerprint === 'scroll:down').length;
   const ups = completedActions.filter(fingerprint => fingerprint === 'scroll:up').length;
@@ -262,6 +261,10 @@ export function buildExplainerDirectorState(requiredKinds, timeline, history, sc
   };
 }
 
+export function directorStateWithScreen(directorState, screen = {}) {
+  return { ...directorState, currentScreen: { title: screen.title, accessibility: screen.content } };
+}
+
 export async function explainerRequirements(id) {
   'use step';
   const item = await explainer(id);
@@ -281,15 +284,17 @@ export async function planScene(id, directorState) {
   const planned = item.plan?.approved ? item.plan.scenes || [] : [];
   const current = planned[directorState.scene.completedScenes];
   const planGuidance = planned.length ? `\nApproved scene plan (follow it in order):\n${planned.map((scene, i) => `${i + 1}. ${scene.title} — goal: ${scene.goal} — narration: ${scene.narration}`).join('\n')}\n${current ? `You are on planned scene ${directorState.scene.completedScenes + 1}: "${current.title}". Achieve its goal with one visible action and use its narration nearly word for word, adjusting only what the screen makes untrue.` : 'Every planned scene is recorded; set done true with a short closing line.'}` : '';
-  const context = `Application: ${item.url}\nRequested coverage: ${item.brief}${planGuidance}\nDirector state:\n${JSON.stringify(directorState)}\nChoose the next action from allowedActions. Use remainingMilestones to decide what the walkthrough still needs. Prioritize the first remaining milestone before optional exploration whenever the current screen can perform it. A milestone counts only after a recorded action visibly completes it.${directorState.scene.estimatedBudgetReached && directorState.remainingMilestones.length ? ` The next action must satisfy one of these remaining milestones: ${directorState.remainingMilestones.join(', ')}.` : ''} Set done true only when remainingMilestones is empty and this scene completes the requested coverage.`;
   const model = modelFor('explainer');
   const routing = { user: item.ownerId, tags: ['feature:explainer-director', `mode:${computerUse ? 'computer-use' : 'browser'}`] };
   const sandbox = new VercelEpisodeSandbox(id, () => {});
   await sandbox.dismissOverlays();
   const withTitle = decision => (current && decision && typeof decision === 'object' ? { ...decision, title: current.title } : decision);
-  if (!computerUse) return withTitle(await provider.generate([{ role: 'system', content: system }, { role: 'user', content: context }], model, routing));
-  const capture = await sandbox.captureForModel(item.url);
-  return withTitle(await provider.generateVisual([{ role: 'system', content: system }, { role: 'user', content: `${context}\nThe attached image is the current live desktop screenshot.` }], capture.image, model, routing));
+  const capture = computerUse ? await sandbox.captureForModel(item.url) : { screen: await sandbox.capture(null, item.url) };
+  const liveState = directorStateWithScreen(directorState, capture.screen);
+  const context = `Application: ${item.url}\nRequested coverage: ${item.brief}${planGuidance}\nDirector state:\n${JSON.stringify(liveState)}\nChoose the next action from allowedActions. Use remainingMilestones to decide what the walkthrough still needs. Prioritize the first remaining milestone before optional exploration whenever the current screen can perform it. A milestone counts only after a recorded action visibly completes it.${liveState.scene.estimatedBudgetReached && liveState.remainingMilestones.length ? ` The next action must satisfy one of these remaining milestones: ${liveState.remainingMilestones.join(', ')}.` : ''} Set done true only when remainingMilestones is empty and this scene completes the requested coverage.`;
+  const attachScreen = decision => ({ ...withTitle(decision), observedScreen: capture.screen });
+  if (!computerUse) return attachScreen(await provider.generate([{ role: 'system', content: system }, { role: 'user', content: context }], model, routing));
+  return attachScreen(await provider.generateVisual([{ role: 'system', content: system }, { role: 'user', content: `${context}\nThe attached image is the current live desktop screenshot.` }], capture.image, model, routing));
 }
 
 export async function renderScene(id, index, narration, action) {
@@ -424,4 +429,3 @@ export async function failExplainer(id, message) {
   await setExplainerFields(id, { status: 'failed', progress: 'Failed', endedAt: stamp(), error: String(message).slice(0, 2000) });
   await new VercelEpisodeSandbox(id, () => {}).close().catch(() => {});
 }
-

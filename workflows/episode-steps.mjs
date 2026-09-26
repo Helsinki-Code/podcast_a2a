@@ -1,7 +1,7 @@
 import { captureError } from '../lib/monitor.mjs';
 import { enterUsage } from '../lib/usage.mjs';
 import { episodeState, appendEpisodeEvent, setEpisodeFields, stamp, uid, putNamedAsset, refundCredits } from '../lib/store.mjs';
-import { modelProviders, speechProviders, supportedVoice } from '../lib/providers.mjs';
+import { isModelObjectFailure, modelProviders, speechProviders, supportedVoice } from '../lib/providers.mjs';
 import { ownContext, transcriptForPrompt } from '../lib/conversation.mjs';
 import { retrieveHybrid } from '../lib/rag-semantic.mjs';
 import { loopView } from '../lib/conversation-loop.mjs';
@@ -47,11 +47,19 @@ export async function plan(episodeId, role, screen, mode, extra = '') {
   const selectedModel = agent.model || (providerName === 'gateway' ? modelFor(isGuestRole(role) ? 'guest' : 'host') : undefined);
   const routing = { user: item.ownerId, tags: [`feature:podcast-${role}`, `mode:${mode}`] };
   let result;
-  if (process.env.COMPUTER_USE_SNAPSHOT_ID && mode === 'turn' && screen?.type === 'browser' && provider.generateVisual) {
-    const capture = await new VercelEpisodeSandbox(episodeId, () => {}, screen, role).captureForModel(item.settings?.demo?.url || '');
-    const visualModel = modelFor('guestComputer');
-    result = await provider.generateVisual(messages, capture.image, visualModel, { ...routing, output: 'podcast' });
-  } else result = await provider.generate(messages, selectedModel, routing);
+  try {
+    if (process.env.COMPUTER_USE_SNAPSHOT_ID && mode === 'turn' && screen?.type === 'browser' && provider.generateVisual) {
+      const capture = await new VercelEpisodeSandbox(episodeId, () => {}, screen, role).captureForModel(item.settings?.demo?.url || '');
+      const visualModel = modelFor('guestComputer');
+      result = await provider.generateVisual(messages, capture.image, visualModel, { ...routing, output: 'podcast' });
+    } else result = await provider.generate(messages, selectedModel, routing);
+  } catch (cause) {
+    if (mode !== 'turn' || !isModelObjectFailure(cause) || !provider.generatePlain) throw cause;
+    const text = await provider.generatePlain(messages, selectedModel, { ...routing, role });
+    if (!text) throw cause;
+    result = { segments: [{ type: 'speak', text }], finish: false };
+    await emit(episodeId, 'notice', { message: `The ${role} response format was repaired without interrupting the episode.` });
+  }
   if (!episodePlanHasContent(result, mode)) throw new Error(`${role} model returned no ${mode === 'interrupt' ? 'interruption verdict' : 'speech or action'}.`);
   const qualityIssue = episodePlanQualityIssue(result, { role, mode });
   if (qualityIssue) throw new Error(`${role} ${qualityIssue}. Regenerate a complete, direct response to the preceding exchange.`);

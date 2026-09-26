@@ -31,6 +31,14 @@ test('retrieval returns only relevant source chunks', () => {
   assert.equal(retrieve(index, 'How do solar panels work?')[0].source, 'solar.txt');
 });
 
+test('podcast turn schema requires a bounded structured episode plan', () => {
+  const schema = providers.EPISODE_PLAN_JSON_SCHEMA;
+  assert.deepEqual(schema.required, ['segments', 'finish']);
+  assert.equal(schema.properties.segments.minItems, 1);
+  assert.ok(schema.properties.segments.items.properties.tool.enum.includes('browser'));
+  assert.equal(providers.isModelObjectFailure(new Error('No object generated: could not parse the response.')), true);
+});
+
 test('sandbox name conflicts are recognized for safe resume', () => {
   assert.equal(isSandboxNameConflict({ statusCode: 400, message: "A sandbox with the name 'podcast-id' already exists for this project." }), true);
   assert.equal(isSandboxNameConflict(new Error("Status code 400 is not ok: A sandbox with the name 'podcast-id' already exists for this project.")), true);
@@ -210,7 +218,7 @@ test('podcast subtitles advance phrase by phrase with the spoken audio', () => {
   assert.match(srt, /<font color="#efbe9e">GUEST<\/font> {2}Great question\./);
   assert.equal((srt.match(/GUEST/g) || []).length, 1);
   assert.match(srt, /--> 00:00:19,000\n/);
-  assert.match(podcastCaptionFilter('bold'), /^subtitles=\/tmp\/podcast-burn\.srt:force_style='.*Alignment=2/);
+  assert.match(podcastCaptionFilter('bold'), /^subtitles=filename='\/tmp\/podcast-burn\.srt':force_style='.*Alignment=2/);
 });
 
 test('environment report names missing configuration without exposing values or requiring E2B', () => {

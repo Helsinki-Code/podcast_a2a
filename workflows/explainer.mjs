@@ -22,6 +22,11 @@ export async function explainerWorkflow(explainerId) {
       for (let attempt = 0; attempt < 3; attempt++) {
         const directorState = buildExplainerDirectorState(requiredKinds, timeline, history, screen, index, sceneBudget);
         decision = await planScene(explainerId, directorState);
+        if (decision?.observedScreen) {
+          screen = decision.observedScreen;
+          decision = { ...decision };
+          delete decision.observedScreen;
+        }
         if (decision?.action) decision.action = resolveActionTarget(decision.action, screen);
         fingerprint = actionFingerprint(decision.action);
         const repeated = completedActions.includes(fingerprint);
