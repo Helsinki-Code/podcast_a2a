@@ -52,6 +52,16 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
     const item = await explainer(parts[2]);
     if (!item || item.ownerId !== auth.userId) return error(res, 404, 'Explainer not found');
     if (parts.length === 3 && req.method === 'GET') return json(res, 200, item);
+    if (parts.length === 3 && req.method === 'PATCH') {
+      const title = String((await body(req, 4000)).title ?? '').trim().slice(0, 120);
+      if (!title) return error(res, 400, 'Enter a title.');
+      await setExplainerFields(item.id, { title });
+      return json(res, 200, { ok: true, title });
+    }
+    if (parts[3] === 'duplicate' && req.method === 'POST') {
+      if (['queued','running','planning','rendering'].includes(item.status)) return error(res, 409, 'Wait for this explainer to finish before duplicating it.');
+      return json(res, 201, await copyExplainerForRestart({ ...item, title: `${item.title} (copy)` }));
+    }
     if (parts[3] === 'restart' && req.method === 'POST') {
       if (!['complete','failed'].includes(item.status)) return error(res, 409, 'Wait for this explainer to finish before restarting it.');
       const restarted = await copyExplainerForRestart(item);

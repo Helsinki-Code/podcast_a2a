@@ -1,3 +1,4 @@
+import { notifyOwner } from '../lib/notify.mjs';
 import { captureError } from '../lib/monitor.mjs';
 import { enterUsage } from '../lib/usage.mjs';
 import { episode, explainer, setEpisodeFields, setExplainerFields, putNamedAsset, readAssetBytes, refundCredits, stamp } from '../lib/store.mjs';
@@ -50,6 +51,7 @@ export async function renderShorts(kind, id) {
       shorts.push({ title: clip.title, start: clip.start, end: clip.end, video: await putNamedAsset(`${kind}-${safe(id)}-short-${index + 1}.mp4`, await browser.readSandboxFile(output)) });
     }
     await update(kind)(id, { shorts, shortsStatus: 'complete', shortsError: null, shortsCredits: 0 });
+    await notifyOwner(item.ownerId, `${shorts.length} shorts are ready`, `Vertical highlights from "${titleOf(kind, item)}" are ready to download.`);
     return shorts;
   } finally {
     await browser.close().catch(() => {});

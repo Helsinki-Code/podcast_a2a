@@ -94,7 +94,14 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
         glowStrength: Math.max(.5, Math.min(1.8, Number(input.settings?.glowStrength) || 1)),
         paneWidth: Math.max(55, Math.min(72, Number(input.settings?.paneWidth) || 66)),
         layout: ['balanced','stage'].includes(input.settings?.layout) ? input.settings.layout : 'balanced',
-        playbackMode: input.settings?.playbackMode === 'background' ? 'background' : 'live'
+        playbackMode: input.settings?.playbackMode === 'background' ? 'background' : 'live',
+        captionOptions: {
+          enabled: input.settings?.captionOptions?.enabled !== false,
+          font: ['sans','serif','mono'].includes(input.settings?.captionOptions?.font) ? input.settings.captionOptions.font : 'sans',
+          size: Math.max(10, Math.min(24, Number(input.settings?.captionOptions?.size) || 13)),
+          position: ['bottom','center','top'].includes(input.settings?.captionOptions?.position) ? input.settings.captionOptions.position : 'bottom',
+          wordsPerCue: Math.max(3, Math.min(10, Number(input.settings?.captionOptions?.wordsPerCue) || 7))
+        }
       }, turns: [], events: []
     };
     await addEpisode(item); return json(res, 201, item);
@@ -118,6 +125,17 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
       const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 15000);
       req.on('close', () => { clearInterval(heartbeat); listeners.get(item.id)?.delete(res); });
       return true;
+    }
+    if (parts.length === 3 && req.method === 'PATCH') {
+      const title = String((await body(req, 4000)).title ?? '').trim().slice(0, 200);
+      if (!title) return error(res, 400, 'Enter a title.');
+      await setEpisodeFields(item.id, { title });
+      return json(res, 200, { ok: true, title });
+    }
+    if (parts[3] === 'duplicate' && req.method === 'POST') {
+      if (['running','preparing'].includes(item.status)) return error(res, 409, 'Wait for this episode to finish before duplicating it.');
+      const copy = await copyEpisodeForRestart({ ...item, ...(item.title ? { title: `${item.title} (copy)` } : {}) });
+      return json(res, 201, copy);
     }
     if (parts[3] === 'restart' && req.method === 'POST') {
       if (!['complete','stopped','failed','interrupted'].includes(item.status)) return error(res, 409, 'Stop or finish this episode before restarting it.');

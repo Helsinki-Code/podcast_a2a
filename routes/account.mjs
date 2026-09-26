@@ -20,12 +20,14 @@ export async function handleUnpaid({ req, res, url, auth }) {
 }
 
 export async function handle({ req, res, url, parts, auth }) {
-  if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, { retentionDays: 0, ...await workspaceSettings(auth.userId) });
+  if (url.pathname === '/api/settings' && req.method === 'GET') { const { emailConfigured } = await import('../lib/mailer.mjs'); return json(res, 200, { retentionDays: 0, notifyEmail: true, ...await workspaceSettings(auth.userId), emailConfigured: emailConfigured() }); }
   if (url.pathname === '/api/settings' && req.method === 'PUT') {
     const input = await body(req, 4000);
     const current = await workspaceSettings(auth.userId);
+    if (auth.role !== 'owner' && auth.role !== 'admin') return error(res, 403, 'Only owners and admins can change workspace settings.');
     const retentionDays = [0, 30, 60, 90, 180, 365].includes(Number(input.retentionDays)) ? Number(input.retentionDays) : Number(current.retentionDays) || 0;
-    return json(res, 200, await saveWorkspaceSettings(auth.userId, { ...current, retentionDays, updatedAt: stamp() }));
+    const notifyEmail = typeof input.notifyEmail === 'boolean' ? input.notifyEmail : current.notifyEmail !== false;
+    return json(res, 200, await saveWorkspaceSettings(auth.userId, { ...current, retentionDays, notifyEmail, updatedAt: stamp() }));
   }
   if (url.pathname === '/api/credits' && req.method === 'GET') {
     const current = await account(auth.userId);

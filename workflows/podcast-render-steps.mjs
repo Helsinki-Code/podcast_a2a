@@ -1,3 +1,4 @@
+import { notifyOwner } from '../lib/notify.mjs';
 import { captureError } from '../lib/monitor.mjs';
 import { enterUsage } from '../lib/usage.mjs';
 import { episode, setEpisodeFields, putNamedAsset, readAssetBytes, refundCredits, stamp } from '../lib/store.mjs';
@@ -56,6 +57,7 @@ export async function renderPodcastTimeline(episodeId) {
   try {
     const fields = await assemblePodcast(browser, item, sourceTimeline, { stem: `episode-${safe(episodeId)}` });
     await setEpisodeFields(episodeId, { ...fields, videoStatus: 'complete', renderedAt: stamp() });
+    await notifyOwner(item.ownerId, `Your podcast is ready: ${item.title || item.outline?.subject}`, 'The finished video, captions, transcript, audio, and thumbnail are ready to download and publish.');
     return fields.mp4;
   } finally {
     await browser.close().catch(() => {});
@@ -126,14 +128,15 @@ export async function assemblePodcast(browser, item, sourceTimeline, { stem, var
   const conversationDuration = cursor - conversationStart;
   if (music.outro) await titleCard('outro', OUTRO_SECONDS);
   await browser.writeSandboxFile('/tmp/podcast-parts.txt', parts.map(filename => `file '${filename}'`).join('\n'));
-  const captionsEnabled = settings.captionsEnabled !== false;
+  const captionsEnabled = settings.captionsEnabled !== false && settings.captionOptions?.enabled !== false;
   const labelColors = Object.fromEntries(roles.map(role => [role, roleAccent(settings, role)]));
-  await browser.writeSandboxFile('/tmp/podcast.srt', podcastCaptions(timed, { speakerLabels: true }));
-  if (captionsEnabled) await browser.writeSandboxFile('/tmp/podcast-burn.srt', podcastCaptions(timed, { speakerLabels: true, labelColors }));
+  const captionOptions = settings.captionOptions || {};
+  await browser.writeSandboxFile('/tmp/podcast.srt', podcastCaptions(timed, { speakerLabels: true, wordsPerCue: captionOptions.wordsPerCue }));
+  if (captionsEnabled) await browser.writeSandboxFile('/tmp/podcast-burn.srt', podcastCaptions(timed, { speakerLabels: true, labelColors, wordsPerCue: captionOptions.wordsPerCue }));
   let result = await browser.run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', '/tmp/podcast-parts.txt', '-vf', 'fps=30,format=yuv420p', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '/tmp/podcast-base.mp4'], 20 * 60 * 1000);
   if (result.exitCode) throw new Error(`Could not assemble the podcast timeline: ${(await result.stderr()).slice(-1200)}`);
   const { width, height, format } = podcastOutputSpec(settings);
-  const finalFilters = [...(captionsEnabled ? [podcastCaptionFilter(settings.captionStyle)] : []), ...(width !== 1920 ? [`scale=${width}:${height}:flags=lanczos`] : [])];
+  const finalFilters = [...(captionsEnabled ? [podcastCaptionFilter(settings.captionStyle, '/tmp/podcast-burn.srt', captionOptions)] : []), ...(width !== 1920 ? [`scale=${width}:${height}:flags=lanczos`] : [])];
   // Final pass: burned captions + output scale on the picture; music bed + loudness on the sound.
   const bed = Boolean(music.bed) && conversationDuration > 0;
   const audioGraph = finalAudioGraph({ bed, volume: music.volume, bedStart: conversationStart, bedDuration: conversationDuration });

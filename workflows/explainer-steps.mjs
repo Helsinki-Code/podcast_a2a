@@ -1,3 +1,4 @@
+import { notifyOwner } from '../lib/notify.mjs';
 import { captureError } from '../lib/monitor.mjs';
 import { enterUsage } from '../lib/usage.mjs';
 import { explainer, setExplainerFields, putNamedAsset, readAssetBytes, refundCredits, stamp } from '../lib/store.mjs';
@@ -396,6 +397,7 @@ export async function finishExplainer(id, timeline) {
   const browser = new VercelEpisodeSandbox(id, () => {});
   const output = await mixExplainer(browser, id, item, timeline);
   await setExplainerFields(id, { status: 'complete', progress: 'Complete', endedAt: stamp(), ...output });
+  await notifyOwner(item.ownerId, `Your explainer is ready: ${item.title}`, 'The narrated video, captions, chapters, and thumbnail are ready to download and publish.');
   await browser.close().catch(() => {});
 }
 

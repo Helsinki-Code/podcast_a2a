@@ -18,6 +18,7 @@ import * as explainerRoutes from './routes/explainers.mjs';
 import * as publishingRoutes from './routes/publishing.mjs';
 import * as publicRoutes from './routes/public.mjs';
 import * as teamRoutes from './routes/team.mjs';
+import * as assistRoutes from './routes/assist.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let initialization;
@@ -30,7 +31,7 @@ function ensureInitialized() {
 }
 
 // Paid-workspace routes, tried in order; each module returns true once it has responded.
-const paidRoutes = [accountRoutes, assetRoutes, personaRoutes, publishingRoutes, episodeRoutes, explainerRoutes];
+const paidRoutes = [accountRoutes, assistRoutes, assetRoutes, personaRoutes, publishingRoutes, episodeRoutes, explainerRoutes];
 
 export async function handler(req, res) {
   try {
