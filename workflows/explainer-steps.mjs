@@ -213,11 +213,29 @@ export async function explainerSceneBudget(id) {
   return sceneBudgetFor(await explainer(id));
 }
 
+// Used when the director cannot produce a valid action: the first unused, non-destructive link or
+// button on screen, else a scroll so the viewer still sees more of the page.
+export function fallbackSceneAction(screen = {}, completedActions = []) {
+  if (!process.env.COMPUTER_USE_SNAPSHOT_ID) {
+    const preferred = ['link', 'tab', 'menuitem', 'button'];
+    const candidates = snapshotElements(screen)
+      .filter(element => preferred.includes(element.role) && element.name && !consequentialControl(element.line))
+      .sort((a, b) => preferred.indexOf(a.role) - preferred.indexOf(b.role));
+    for (const element of candidates) {
+      const action = { type: 'click', selector: `@${element.ref}` };
+      if (!completedActions.includes(actionFingerprint(action)) && actionIsCompatible(action, screen)) return action;
+    }
+  }
+  const downs = completedActions.filter(fingerprint => fingerprint === 'scroll:down').length;
+  const ups = completedActions.filter(fingerprint => fingerprint === 'scroll:up').length;
+  return { type: 'scroll', direction: downs > ups + 2 ? 'up' : 'down', amount: process.env.COMPUTER_USE_SNAPSHOT_ID ? 5 : 900 };
+}
+
 export function requiredActionKinds(brief = '') {
   const text = String(brief).toLowerCase();
   const required = [];
   if (/\bscroll(?:ing|ed)?\b/.test(text)) required.push('scroll');
-  if (/\b(?:type|typing|enter|fill|write)\b/.test(text)) required.push('type');
+  if (/\b(?:type|typing|fill in|fill out|search for)\b|\benter (?:a |an |your |some |the )?(?:url|website|web address|address|domain|name|email|value|text|keyword|query|search|password|number|message|prompt|details)\b/.test(text)) required.push('type');
   if (/\b(?:click|open|navigate|select|choose)\b/.test(text)) required.push('navigate');
   return required;
 }

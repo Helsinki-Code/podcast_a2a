@@ -60,7 +60,9 @@ export async function busy(button, run, label = '') {
 
 export function errorMarkup(message, className = 'row-error') {
   const info = friendlyError(message);
-  return info ? `<small class="${className}" title="${esc(info.detail)}"><strong>${esc(info.title)}.</strong> ${esc(info.hint)}</small>` : '';
+  if (!info) return '';
+  const details = info.detail && info.detail !== info.title ? `<details class="error-details"><summary>Details</summary>${esc(info.detail)}</details>` : '';
+  return `<small class="${className}" title="${esc(info.detail)}"><strong>${esc(info.title)}.</strong> ${esc(info.hint)}${details}</small>`;
 }
 
 export const shortDate = date => date ? new Date(date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '';

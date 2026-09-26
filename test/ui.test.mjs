@@ -33,13 +33,13 @@ test('library search, type tabs, rename, and delete', { skip }, async () => {
   await page.fill('#librarySearch', 'pricing');
   assert.equal(await page.locator('.library-card').count(), 1);
   const card = page.locator('.library-card').first();
-  await card.locator('summary').click();
+  await card.locator('summary[aria-label^="More actions"]').click();
   await card.locator('[data-action=rename]').click();
   await page.fill('#confirmDialog input', 'Pricing tests, renamed');
   await page.click('#confirmDialog [data-confirm]');
   await page.fill('#librarySearch', 'renamed');
   await page.waitForSelector('.library-card h3:has-text("Pricing tests, renamed")');
-  await page.locator('.library-card').first().locator('summary').click();
+  await page.locator('.library-card').first().locator('summary[aria-label^="More actions"]').click();
   await page.locator('.library-card').first().locator('[data-action=delete]').click();
   await page.click('#confirmDialog [data-confirm]');
   await page.fill('#librarySearch', '');
@@ -75,7 +75,7 @@ test('viewers see the workspace read-only', { skip }, async () => {
   await page.waitForSelector('.library-card');
   assert.equal(await page.isVisible('.top-actions [data-new=podcast]'), false);
   assert.match(await page.textContent('#roleBadge'), /viewer/);
-  await page.locator('.library-card').first().locator('summary').click().catch(() => {});
+  await page.locator('.library-card').first().locator('summary[aria-label^="More actions"]').click().catch(() => {});
   assert.equal(await page.locator('.library-card [data-action=delete]').count(), 0);
   await context.close();
 });
