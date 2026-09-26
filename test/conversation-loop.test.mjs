@@ -106,6 +106,7 @@ test('friendly errors explain common failures with a next step', () => {
   assert.equal(friendlyError(''), null);
   assert.match(friendlyError('Playback client did not acknowledge speech within five minutes.').hint, /Background/);
   assert.equal(friendlyError('The recording workflow failed: Failed to serialize step arguments at .thisVal.playbackWaiter').title, 'The recording workflow stopped');
+  assert.equal(friendlyError('agent-browser Daemon failed to start (socket: stale.sock)').title, 'The recording computer had a problem');
   assert.match(friendlyError('This podcast needs 20 credits.').title, /credits/);
   assert.match(friendlyError('Podcast quality check failed: frozen video').title, /quality/);
   assert.equal(friendlyError('weird').title, 'Something went wrong');

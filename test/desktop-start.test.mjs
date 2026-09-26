@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, symlink, writeFile, chmod, readlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DESKTOP_START_SCRIPT } from '../lib/vercel-sandbox.mjs';
+import { DESKTOP_START_SCRIPT, VercelEpisodeSandbox, agentBrowserCleanupScript } from '../lib/vercel-sandbox.mjs';
 
 // A resumed persistent sandbox keeps /tmp but not its processes, so Chrome's profile lock still
 // names the old machine. The desktop start script must clear it; the display, window manager, and
@@ -14,6 +14,47 @@ let chrome = '';
 try { chrome = (await import('playwright-core')).chromium.executablePath(); } catch {}
 const tools = ['curl', 'pgrep', 'pkill'].every(tool => spawnSync('sh', ['-c', `command -v ${tool}`]).status === 0);
 const portFree = spawnSync('curl', ['-fsS', '--max-time', '1', 'http://127.0.0.1:9222/json/version']).status !== 0;
+
+test('agent-browser cleanup removes stale session daemon files', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'agent-browser-home-'));
+  const state = path.join(home, '.agent-browser');
+  await mkdir(state);
+  const session = 'podcast-stale-test';
+  for (const suffix of ['sock', 'pid', 'version', 'config', 'stream', 'engine']) await writeFile(path.join(state, `${session}.${suffix}`), suffix === 'pid' ? 'not-a-pid' : 'stale');
+  try {
+    const cleaned = spawnSync('sh', ['-lc', agentBrowserCleanupScript(session)], { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+    assert.equal(cleaned.status, 0, cleaned.stderr);
+    for (const suffix of ['sock', 'pid', 'version', 'config', 'stream', 'engine']) assert.equal(existsSync(path.join(state, `${session}.${suffix}`)), false);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('a stale connected marker is probed, cleaned, and reconnected', async () => {
+  const before = process.env.COMPUTER_USE_SNAPSHOT_ID;
+  process.env.COMPUTER_USE_SNAPSHOT_ID = 'snapshot-test';
+  const controller = new VercelEpisodeSandbox('retry-test', () => {});
+  const agentCalls = [];
+  let resets = 0;
+  controller.rawAgentCommand = async (_sandbox, args) => {
+    agentCalls.push(args.join(' '));
+    if (agentCalls.length <= 2) throw new Error('stale daemon');
+    return { stdout: JSON.stringify({ success: true }) };
+  };
+  controller.resetAgentBrowser = async () => { resets++; };
+  const sandbox = {
+    async runCommand(command, args) {
+      if (command === 'sh' && args[1]?.includes('curl -fsS')) return { exitCode: 0 };
+      if (command === 'test') return { exitCode: 0 };
+      return { exitCode: 0, stdout: async () => '', stderr: async () => '' };
+    }
+  };
+  try {
+    assert.equal(await controller.ensureDesktop(sandbox), sandbox);
+    assert.equal(resets, 1);
+    assert.deepEqual(agentCalls, ['get url', 'connect http://127.0.0.1:9222', 'connect http://127.0.0.1:9222', 'get url']);
+  } finally {
+    if (before == null) delete process.env.COMPUTER_USE_SNAPSHOT_ID; else process.env.COMPUTER_USE_SNAPSHOT_ID = before;
+  }
+});
 
 // Force-stop the stand-in servers and wait until they are gone, so the next start sees no display.
 function stopStandIns() {
