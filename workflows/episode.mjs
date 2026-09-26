@@ -1,6 +1,6 @@
 import { defineHook, sleep } from 'workflow';
 import { runConversation } from '../lib/conversation-loop.mjs';
-import { begin, snapshot, plan, prepareSpeech, publishSpeech, act, finish, emitInterruption, emitNotice, interjectionVerdict, expired, newEventId } from './episode-steps.mjs';
+import { begin, snapshot, plan, prepareSpeech, publishSpeech, act, finish, emitInterruption, emitNotice, interjectionVerdict, expired, newEventId, summarize } from './episode-steps.mjs';
 import { renderPodcastTimeline, failPodcastRender } from './podcast-render-steps.mjs';
 
 export const playbackHook = defineHook();
@@ -20,7 +20,7 @@ async function playbackWaiter(episodeId, eventId) {
 export async function episodeWorkflow(episodeId, launch = {}) {
   'use workflow';
   await runConversation(episodeId, {
-    begin, snapshot, plan, prepareSpeech, publishSpeech, act, finish, emitInterruption, emitNotice, interjectionVerdict, expired, newEventId,
+    begin, snapshot, plan, prepareSpeech, publishSpeech, act, finish, emitInterruption, emitNotice, interjectionVerdict, expired, newEventId, summarize,
     playbackWaiter, render: renderPodcastTimeline, failRender: failPodcastRender
   });
 }

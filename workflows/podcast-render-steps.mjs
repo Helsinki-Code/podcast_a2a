@@ -2,10 +2,11 @@ import { episode, setEpisodeFields, putNamedAsset, readAssetBytes, refundCredits
 import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';
 import { podcastTimeline, podcastCaptions, podcastCaptionFilter } from '../lib/podcast-timeline.mjs';
 import { inspectSandboxMedia, evaluateMediaQuality } from '../lib/media-quality.mjs';
+import { stageHtml, titleCardHtml, generatedMusicSource, titleMusicFilter, finalAudioGraph, SPEECH_TRIM_FILTER, interruptionFadeFilter, INTRO_SECONDS, OUTRO_SECONDS } from '../lib/podcast-media.mjs';
+import { castRoles, roleAccent } from '../lib/cast.mjs';
 
 const safe = value => String(value || '').replace(/[^a-zA-Z0-9._-]/g, '_');
 const extension = reference => /\.webp$/i.test(reference) ? 'webp' : /\.jpe?g$/i.test(reference) ? 'jpg' : 'png';
-const html = value => String(value || '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const imageData = (bytes, reference) => bytes?.length ? `data:image/${extension(reference) === 'jpg' ? 'jpeg' : extension(reference)};base64,${bytes.toString('base64')}` : '';
 
 export function podcastOutputSpec(settings = {}) {
@@ -24,15 +25,6 @@ async function probeDuration(browser, filename) {
   const duration = Number((await result.stdout()).trim());
   if (!(duration > 0)) throw new Error(`${filename} has no valid duration.`);
   return duration;
-}
-
-function stageHtml(item, entry, hostImage, guestImage, screenImage) {
-  const settings = item.settings || {};
-  const accent = /^#[0-9a-f]{6}$/i.test(settings.accent) ? settings.accent : '#80ded1';
-  const guestAccent = /^#[0-9a-f]{6}$/i.test(settings.guestAccent) ? settings.guestAccent : '#efbe9e';
-  const background = /^#[0-9a-f]{6}$/i.test(settings.background) ? settings.background : '#101c24';
-  const avatar = (person, image, role, color) => `<section class="person ${entry.role === role ? 'active' : ''}" style="--color:${color}"><div class="avatar">${image ? `<img src="${image}">` : `<span>${html(person?.name?.[0] || '?')}</span>`}</div><strong>${html(person?.name || role)}</strong><small>${role.toUpperCase()}</small></section>`;
-  return `<!doctype html><meta charset="utf-8"><style>*{box-sizing:border-box}html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:${background};font-family:Arial,sans-serif;color:#f4faf7}body{background:radial-gradient(circle at 50% 38%,#26545066 0,${background} 62%)}header{height:150px;padding:42px 78px;background:#0b171cb8}header b{display:block;color:${accent};font-size:24px;letter-spacing:7px}header span{display:block;color:#bbd2cc;font-size:26px;margin-top:17px}.layout{height:770px;display:grid;grid-template-columns:${screenImage ? '620px 1fr' : '1fr 1fr'};align-items:center;gap:54px;padding:40px 70px}.people{display:${screenImage ? 'grid' : 'contents'};gap:28px}.person{text-align:center;opacity:.58}.person.active{opacity:1}.avatar{width:${screenImage ? 250 : 330}px;height:${screenImage ? 250 : 330}px;border:6px solid var(--color);box-shadow:0 0 10px var(--color);margin:auto;overflow:hidden;border-radius:50%;background:var(--color);display:grid;place-items:center}.active .avatar{border-width:14px;box-shadow:0 0 55px var(--color)}.avatar img{width:100%;height:100%;object-fit:cover}.avatar span{font-size:150px;font-weight:800;color:#173038}.person strong{display:block;font-size:34px;margin-top:24px}.person small{display:block;color:var(--color);font-size:18px;font-weight:800;letter-spacing:5px;margin-top:10px}.screen{height:690px;border:5px solid #487068;border-radius:26px;background:#081216;padding:18px;display:grid;place-items:center}.screen img{max-width:100%;max-height:100%;object-fit:contain}</style><header><b>THE SALES FORGE</b><span>${html(item.outline?.subject || 'AI PODCAST')}</span></header><main class="layout"><div class="people">${avatar(item.personas?.host, hostImage, 'host', accent)}${avatar(item.personas?.guest, guestImage, 'guest', guestAccent)}</div>${screenImage ? `<div class="screen"><img src="${screenImage}"></div>` : ''}</main>`;
 }
 
 async function renderStage(browser, filename, markup) {
@@ -57,26 +49,49 @@ export async function renderPodcastTimeline(episodeId) {
   if (item.settings?.requireGuestDemo && browserCount < 1) throw new Error('The required guest Computer Use demonstration is missing from the podcast timeline.');
   const browser = new VercelEpisodeSandbox(`render-${episodeId}`, () => {});
   try {
-    const host = item.personas?.host || {}, guest = item.personas?.guest || {};
-    const [hostBytes, guestBytes] = await Promise.all([optionalAsset(host.image), optionalAsset(guest.image)]);
-    const hostImage = imageData(hostBytes, host.image), guestImage = imageData(guestBytes, guest.image);
+    const settings = item.settings || {};
+    const music = settings.music || {};
+    const roles = castRoles(item);
+    const roleBytes = await Promise.all(roles.map(role => optionalAsset(item.personas?.[role]?.image)));
+    const logoBytes = await optionalAsset(item.brand?.logo);
+    const images = { logo: imageData(logoBytes, item.brand?.logo), roles: Object.fromEntries(roles.map((role, i) => [role, imageData(roleBytes[i], item.personas?.[role]?.image)])) };
+    const musicTrack = music.track ? await optionalAsset(music.track) : null;
+    if (musicTrack?.length) await browser.writeSandboxFile('/tmp/podcast-music-source', musicTrack);
+    const musicInput = seconds => musicTrack?.length ? ['-stream_loop', '-1', '-i', '/tmp/podcast-music-source'] : ['-f', 'lavfi', '-i', generatedMusicSource(seconds)];
     const parts = [];
     const timed = [];
     let cursor = 0;
+    // Title cards (intro/outro) are still frames with music under them.
+    const titleCard = async (kind, seconds) => {
+      const stagePath = `/tmp/podcast-${kind}.png`, segmentPath = `/tmp/podcast-${kind}.mp4`;
+      await renderStage(browser, stagePath, titleCardHtml(item, images, kind));
+      const result = await browser.run('ffmpeg', ['-y', '-loop', '1', '-framerate', '30', '-i', stagePath, ...musicInput(seconds), '-t', seconds.toFixed(2), '-filter_complex', `[0:v]scale=1920:1080,fps=30,format=yuv420p,fade=t=in:d=0.5,fade=t=out:st=${(seconds - 0.6).toFixed(2)}:d=0.6[v];[1:a]${titleMusicFilter(seconds)}[a]`, '-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', segmentPath], 5 * 60 * 1000);
+      if (result.exitCode) throw new Error(`Could not render the ${kind} card: ${(await result.stderr()).slice(-1200)}`);
+      parts.push(segmentPath);
+      cursor += seconds;
+    };
+    if (music.intro) await titleCard('intro', INTRO_SECONDS);
+    const conversationStart = cursor;
     for (let index = 0; index < sourceTimeline.length; index++) {
       const entry = sourceTimeline[index];
       if (entry.type === 'speech') {
         const [audioBytes, screenBytes, actionBytes] = await Promise.all([readAssetBytes(entry.audio), optionalAsset(entry.screen), optionalAsset(entry.video)]);
         const audioPath = `/tmp/podcast-speech-${index}.mp3`;
-        const trimmedAudioPath = `/tmp/podcast-speech-${index}.wav`;
+        let trimmedAudioPath = `/tmp/podcast-speech-${index}.wav`;
         const stagePath = `/tmp/podcast-stage-${index}.png`;
         const segmentPath = `/tmp/podcast-part-${index}.mp4`;
         await browser.writeSandboxFile(audioPath, audioBytes);
-        let result = await browser.run('ffmpeg', ['-y', '-i', audioPath, '-af', 'silenceremove=start_periods=1:start_duration=0.03:start_threshold=-42dB:start_silence=0.01,areverse,silenceremove=start_periods=1:start_duration=0.03:start_threshold=-42dB:start_silence=0.02,areverse', '-ar', '48000', '-ac', '2', trimmedAudioPath], 120000);
+        let result = await browser.run('ffmpeg', ['-y', '-i', audioPath, '-af', SPEECH_TRIM_FILTER, '-ar', '48000', '-ac', '2', trimmedAudioPath], 120000);
         if (result.exitCode) throw new Error(`Could not remove speech boundary silence ${index + 1}: ${(await result.stderr()).slice(-1200)}`);
         const audioDuration = await probeDuration(browser, trimmedAudioPath);
+        const fade = entry.interrupted ? interruptionFadeFilter(audioDuration) : '';
+        if (fade) {
+          const fadedPath = `/tmp/podcast-speech-${index}-cut.wav`;
+          result = await browser.run('ffmpeg', ['-y', '-i', trimmedAudioPath, '-af', fade, fadedPath], 120000);
+          if (!result.exitCode) trimmedAudioPath = fadedPath;
+        }
         const duration = audioDuration + entry.gap;
-        await renderStage(browser, stagePath, stageHtml(item, entry, hostImage, guestImage, imageData(screenBytes, entry.screen)));
+        await renderStage(browser, stagePath, stageHtml(item, entry, images, imageData(screenBytes, entry.screen)));
         if (actionBytes?.length) {
           const actionPath = `/tmp/podcast-action-${index}.mp4`;
           await browser.writeSandboxFile(actionPath, actionBytes);
@@ -92,19 +107,24 @@ export async function renderPodcastTimeline(episodeId) {
         cursor += duration;
       }
     }
+    const conversationDuration = cursor - conversationStart;
+    if (music.outro) await titleCard('outro', OUTRO_SECONDS);
     await browser.writeSandboxFile('/tmp/podcast-parts.txt', parts.map(filename => `file '${filename}'`).join('\n'));
-    const settings = item.settings || {};
     const captionsEnabled = settings.captionsEnabled !== false;
-    const labelColors = { host: /^#[0-9a-f]{6}$/i.test(settings.accent) ? settings.accent : '#80ded1', guest: /^#[0-9a-f]{6}$/i.test(settings.guestAccent) ? settings.guestAccent : '#efbe9e' };
+    const labelColors = Object.fromEntries(roles.map(role => [role, roleAccent(settings, role)]));
     await browser.writeSandboxFile('/tmp/podcast.srt', podcastCaptions(timed, { speakerLabels: true }));
     if (captionsEnabled) await browser.writeSandboxFile('/tmp/podcast-burn.srt', podcastCaptions(timed, { speakerLabels: true, labelColors }));
     let result = await browser.run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', '/tmp/podcast-parts.txt', '-vf', 'fps=30,format=yuv420p', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '/tmp/podcast-base.mp4'], 20 * 60 * 1000);
     if (result.exitCode) throw new Error(`Could not assemble the podcast timeline: ${(await result.stderr()).slice(-1200)}`);
     const { width, height, format } = podcastOutputSpec(settings);
     const finalFilters = [...(captionsEnabled ? [podcastCaptionFilter(settings.captionStyle)] : []), ...(width !== 1920 ? [`scale=${width}:${height}:flags=lanczos`] : [])];
-    const finalArgs = ['-y', '-i', '/tmp/podcast-base.mp4', ...(finalFilters.length ? ['-vf', finalFilters.join(',')] : []), '-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', '/tmp/podcast-final.mp4'];
+    // Final pass: burned captions + output scale on the picture; music bed + loudness on the sound.
+    const bed = Boolean(music.bed) && conversationDuration > 0;
+    const audioGraph = finalAudioGraph({ bed, volume: music.volume, bedStart: conversationStart, bedDuration: conversationDuration });
+    const videoGraph = finalFilters.length ? `[0:v]${finalFilters.join(',')}[vout]` : '[0:v]null[vout]';
+    const finalArgs = ['-y', '-i', '/tmp/podcast-base.mp4', ...(bed ? musicInput(conversationDuration + 1) : []), '-filter_complex', `${videoGraph};${audioGraph}`, '-map', '[vout]', '-map', '[aout]', '-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '/tmp/podcast-final.mp4'];
     result = await browser.run('ffmpeg', finalArgs, 20 * 60 * 1000);
-    if (result.exitCode) throw new Error(`Could not burn podcast captions: ${(await result.stderr()).slice(-1200)}`);
+    if (result.exitCode) throw new Error(`Could not mix the final podcast: ${(await result.stderr()).slice(-1200)}`);
     const quality = await inspectSandboxMedia(browser, '/tmp/podcast-final.mp4', { sceneThreshold: 0.008, silenceNoise: '-30dB', silenceDuration: .25 });
     const verdict = evaluateMediaQuality(quality, { interactive: Boolean(item.settings?.requireGuestDemo), minDuration: 4, maxSilencePercent: 15, maxSilenceSeconds: 1 });
     if (!verdict.passed) throw new Error(`Podcast quality check failed: ${verdict.failures.join(' ')}`);

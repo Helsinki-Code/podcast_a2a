@@ -1,10 +1,11 @@
 import { timedSubtitleCues, cueAt } from './captions.js';
 import { friendlyError } from './errors.js';
+import { CAST_ROLES, castRoles, roleAccent, roleLabel } from './cast.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const esc = text => String(text ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = { personas: [], episodes: [], explainers: [], config: null, account: null, clerk: null, current: null, eventSource: null, pollTimer: null, explainerPoll: null, recorder: null, recorderChunks: [], audioContext: null, audioElement: null, speechElements: {}, sandboxAudioElement: null, sandboxPlaying: false, screenVideoElement: null, screenVideoPlaying: false, pendingSandboxAudio: null, audioUnlock: null, analyser: null, audioDestination: null, queue: [], playing: false, screen: { type: 'idle', title: 'The stage is ready', content: '' }, speaker: null, caption: '', amplitude: 0, startTime: 0, hostImage: null, guestImage: null, screenImage: null, ended: false, seen: new Set(), credentials: new Map(), localVideoUrl: null, mediaCancels: new Map(), cursor: 0 };
+const state = { personas: [], episodes: [], explainers: [], config: null, account: null, clerk: null, current: null, eventSource: null, pollTimer: null, explainerPoll: null, recorder: null, recorderChunks: [], audioContext: null, audioElement: null, speechElements: {}, sandboxAudioElement: null, sandboxPlaying: false, screenVideoElement: null, screenVideoPlaying: false, pendingSandboxAudio: null, audioUnlock: null, analyser: null, audioDestination: null, queue: [], playing: false, screen: { type: 'idle', title: 'The stage is ready', content: '' }, speaker: null, caption: '', amplitude: 0, startTime: 0, roleImages: {}, screenImage: null, ended: false, seen: new Set(), credentials: new Map(), localVideoUrl: null, mediaCancels: new Map(), cursor: 0 };
 
 async function api(path, options = {}) {
   const token = await state.clerk?.session?.getToken().catch(() => null);
@@ -60,7 +61,7 @@ function openPersona(existing = null) {
   populateSelect($('#modelProvider'), (state.config?.providers.models || []).map(x => [x,x]), existing?.modelProvider || 'gateway');
   populateSelect($('#speechProvider'), (state.config?.providers.speech || []).map(x => [x,x]), existing?.speechProvider || (state.config?.providers.ready.speech.openai ? 'openai' : 'gateway'));
   updateVoiceSuggestions(); $('#voiceSelect').value = existing?.voice || (state.config?.providers.voices?.[$('#speechProvider').value]?.[0] || '');
-  if (existing) for (const key of ['name','systemPrompt','model']) form.elements[key].value = existing[key] || '';
+  if (existing) for (const key of ['name','systemPrompt','model','voiceStyle']) form.elements[key].value = existing[key] || '';
   form._image = existing?.image || ''; form._knowledge = existing?.knowledge || [];
   $('#imagePreview').innerHTML = form._image ? `<img src="${esc(form._image)}" alt="Selected display image">` : 'No image selected';
   $('#knowledgeList').textContent = form._knowledge.map(k => k.name).join(' · ') || 'No knowledge files';
@@ -78,9 +79,18 @@ function openEpisodeDialog() {
   $('#playbackModeField').classList.toggle('hidden', !state.config?.storage?.remoteAssets);
   populateSelect($('#hostSelect'), state.personas.map(p => [p.id,p.name]), state.personas[0].id);
   populateSelect($('#guestSelect'), state.personas.map(p => [p.id,p.name]), state.personas[1].id);
+  for (const id of ['#cohostSelect','#guest2Select','#guest3Select']) populateSelect($(id), [['', 'None'], ...state.personas.map(p => [p.id,p.name])], '');
+  $('#maxInterruptionsValue').textContent = '4 per episode'; $('#musicVolumeValue').textContent = '8%';
   $('#episodeDialog').showModal();
 }
 function updateVoiceSuggestions() { const voices = state.config?.providers.voices?.[$('#speechProvider').value] || []; $('#voiceSuggestions').innerHTML = voices.map(voice => `<option value="${esc(voice)}"></option>`).join(''); }
+async function uploadFile(file, kind) {
+  const token = await state.clerk?.session?.getToken();
+  const response = await fetch(`/api/uploads?kind=${kind}&name=${encodeURIComponent(file.name)}`, { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: file });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Could not upload ${file.name}`);
+  return data;
+}
 async function extractFile(file) {
   if (/\.(txt|md|csv|json)$/i.test(file.name)) return file.text();
   const token = await state.clerk?.session?.getToken();
@@ -103,7 +113,7 @@ async function savePersona(event) {
       if (file.size > 5_000_000) throw new Error(`${file.name} exceeds the 5 MB file limit.`);
       knowledge.push({ name: file.name, text: await extractFile(file) });
     }
-    const data = { name: form.elements.name.value, systemPrompt: form.elements.systemPrompt.value, modelProvider: form.elements.modelProvider.value, model: form.elements.model.value, speechProvider: form.elements.speechProvider.value, voice: form.elements.voice.value, image, knowledge };
+    const data = { name: form.elements.name.value, systemPrompt: form.elements.systemPrompt.value, modelProvider: form.elements.modelProvider.value, model: form.elements.model.value, speechProvider: form.elements.speechProvider.value, voice: form.elements.voice.value, voiceStyle: form.elements.voiceStyle.value, image, knowledge };
     await api(form.dataset.edit ? `/api/personas/${form.dataset.edit}` : '/api/personas', { method: form.dataset.edit ? 'PUT' : 'POST', body: JSON.stringify(data) });
     $('#personaDialog').close(); await refresh(); notice('Persona saved.', true);
   } catch (error) { notice(error.message); } finally { submit.disabled = false; }
@@ -114,7 +124,13 @@ async function saveEpisode(event) {
     const [width,height] = form.elements.resolution.value.split('x').map(Number);
     const authRequired = form.elements.authRequired.checked;
     if (authRequired && (!form.elements.demoUrl.value || !form.elements.demoUsername.value || !form.elements.demoPassword.value)) throw new Error('Add the platform URL, username, and password before creating this authenticated demo.');
-    const data = { hostId: form.elements.hostId.value, guestId: form.elements.guestId.value, outline: { subject: form.elements.subject.value, angle: form.elements.angle.value, points: form.elements.points.value }, settings: { layout: form.elements.layout.value, maxMinutes: +form.elements.maxMinutes.value, width, height, outputFormat: form.elements.outputFormat.value, captionStyle: form.elements.captionStyle.value, accent: form.elements.accent.value, guestAccent: form.elements.guestAccent.value, background: form.elements.background.value, glowStrength: +form.elements.glowStrength.value, paneWidth: +form.elements.paneWidth.value, interjections: form.elements.interjections.checked, playbackMode: state.config?.storage?.remoteAssets ? form.elements.playbackMode.value : 'live', interjectProbability: +form.elements.interjectProbability.value / 100, hostTools: form.elements.hostTools.checked, requireGuestDemo: form.elements.requireGuestDemo.checked, demo: { url: form.elements.demoUrl.value, loginUrl: form.elements.demoLoginUrl.value, brief: form.elements.demoBrief.value, authRequired, usernameSelector: form.elements.usernameSelector.value, passwordSelector: form.elements.passwordSelector.value, submitSelector: form.elements.submitSelector.value } } };
+    let musicTrack = '';
+    const musicFile = form.elements.musicFile.files[0];
+    if (musicFile) {
+      if (musicFile.size > 15_000_000) throw new Error('Music tracks must be under 15 MB.');
+      musicTrack = (await uploadFile(musicFile, 'music')).asset;
+    }
+    const data = { hostId: form.elements.hostId.value, guestId: form.elements.guestId.value, cohostId: form.elements.cohostId.value, guest2Id: form.elements.guest2Id.value, guest3Id: form.elements.guest3Id.value, outline: { subject: form.elements.subject.value, angle: form.elements.angle.value, points: form.elements.points.value }, settings: { layout: form.elements.layout.value, maxMinutes: +form.elements.maxMinutes.value, width, height, outputFormat: form.elements.outputFormat.value, captionStyle: form.elements.captionStyle.value, accent: form.elements.accent.value, guestAccent: form.elements.guestAccent.value, background: form.elements.background.value, glowStrength: +form.elements.glowStrength.value, paneWidth: +form.elements.paneWidth.value, interjections: form.elements.interjections.checked, maxInterruptions: +form.elements.maxInterruptions.value, targetMinutes: +form.elements.targetMinutes.value, music: { intro: form.elements.musicIntro.checked, outro: form.elements.musicOutro.checked, bed: form.elements.musicBed.checked, volume: +form.elements.musicVolume.value / 100, track: musicTrack }, playbackMode: state.config?.storage?.remoteAssets ? form.elements.playbackMode.value : 'live', interjectProbability: +form.elements.interjectProbability.value / 100, hostTools: form.elements.hostTools.checked, requireGuestDemo: form.elements.requireGuestDemo.checked, demo: { url: form.elements.demoUrl.value, loginUrl: form.elements.demoLoginUrl.value, brief: form.elements.demoBrief.value, authRequired, usernameSelector: form.elements.usernameSelector.value, passwordSelector: form.elements.passwordSelector.value, submitSelector: form.elements.submitSelector.value } } };
     const episode = await api('/api/episodes', { method: 'POST', body: JSON.stringify(data) });
     if (authRequired) state.credentials.set(episode.id, { username: form.elements.demoUsername.value, password: form.elements.demoPassword.value });
     $('#episodeDialog').close(); await refresh(); await openStudio(episode.id);
@@ -129,9 +145,9 @@ async function openStudio(id) {
   state.current = await api(`/api/episodes/${id}`);
   state.current.turns = [];
   state.screen = { type: 'idle', title: 'The stage is ready', content: '' }; state.screenImage = null; state.screenVideoElement = null; state.screenVideoPlaying = false; state.speaker = null; state.caption = ''; state.amplitude = 0; state.queue = []; state.playing = false; state.sandboxPlaying = false; state.pendingSandboxAudio = null; state.seen = new Set(); state.ended = ['complete','stopped','failed','interrupted'].includes(state.current.status);
-  state.hostImage = await loadImage(episodePerson(state.current,'host')?.image); state.guestImage = await loadImage(episodePerson(state.current,'guest')?.image);
+  state.roleImages = Object.fromEntries(await Promise.all(castRoles(state.current).map(async role => [role, await loadImage(episodePerson(state.current, role)?.image)])));
   $('#studioTitle').textContent = state.current.outline.subject;
-  $('#studioMeta').textContent = `${episodePerson(state.current,'host')?.name || 'Host'} × ${episodePerson(state.current,'guest')?.name || 'Guest'} · ${shortDate(state.current.createdAt)}`;
+  $('#studioMeta').textContent = `${castRoles(state.current).map(role => episodePerson(state.current, role)?.name || roleLabel(role)).join(' × ')} · ${shortDate(state.current.createdAt)}`;
   $('#transcriptPane').innerHTML = ''; $('#activityPane').innerHTML = '';
   $('#startEpisode').classList.toggle('hidden', state.current.status !== 'draft');
   $('#enableAudio').classList.add('hidden');
@@ -228,7 +244,7 @@ function credentialsForCurrentEpisode() {
     form.addEventListener('submit', submit); $('#openEpisodeDesktop').addEventListener('click', openDesktop); $('#episodeDesktopReady').addEventListener('click', desktopReady); dialog.addEventListener('close', close); dialog.showModal();
   });
 }
-function appendTranscript(role, text) { const pane = $('#transcriptPane'); pane.insertAdjacentHTML('beforeend', `<div class="transcript-item ${role}"><strong>${esc(role)} · LIVE</strong><p>${esc(text)}</p></div>`); pane.scrollTop = pane.scrollHeight; }
+function appendTranscript(role, text, sources = [], eventId = '') { const pane = $('#transcriptPane'); const name = episodePerson(state.current, role)?.name || roleLabel(role); pane.insertAdjacentHTML('beforeend', `<div class="transcript-item ${esc(role)}" data-event="${esc(eventId)}" style="--role:${roleAccent(state.current?.settings, role)}"><strong>${esc(name)} · ${esc(roleLabel(role))}</strong><p>${esc(text)}</p>${sources?.length ? `<small class="sources">Sources: ${sources.map(esc).join(', ')}</small>` : ''}</div>`); pane.scrollTop = pane.scrollHeight; }
 function appendActivity(title, content, assetUrl) { const pane = $('#activityPane'); const link = assetUrl?.startsWith('/assets/') ? `<br><a href="${esc(assetUrl)}" target="_blank" rel="noopener">Open artifact ↗</a>` : ''; pane.insertAdjacentHTML('beforeend', `<div class="activity-item"><strong>${esc(title)}</strong>${esc(content || '')}${link}</div>`); pane.scrollTop = pane.scrollHeight; }
 function processEvent(event, history = false) {
   if (state.seen.has(event.id)) return; state.seen.add(event.id);
@@ -238,7 +254,7 @@ function processEvent(event, history = false) {
   }
   if (event.type === 'speech') {
     state.current.turns.push({ role: event.role, text: event.text });
-    appendTranscript(event.role, event.text);
+    appendTranscript(event.role, event.text, event.sources, event.id);
     if (!history && !event.acknowledged) { state.queue.push(event); playQueue(); }
   }
   if (event.type === 'tool_start') { appendActivity(`Started ${event.tool}`, JSON.stringify(event.input).slice(0, 350)); state.screen = { type: 'working', title: `${event.tool} in progress`, content: 'Live sandbox activity…' }; }
@@ -250,11 +266,11 @@ function processEvent(event, history = false) {
 }
 const SILENT_AUDIO = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 function initializeAudioGraph() {
-  if (state.audioContext && state.speechElements.host && state.speechElements.guest && state.sandboxAudioElement) return;
+  if (state.audioContext && CAST_ROLES.every(role => state.speechElements[role]) && state.sandboxAudioElement) return;
   state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
   state.audioDestination = state.audioContext.createMediaStreamDestination();
   state.analyser = state.audioContext.createAnalyser(); state.analyser.fftSize = 256;
-  for (const role of ['host','guest']) {
+  for (const role of CAST_ROLES) {
     const element = new Audio(); element.preload = 'auto'; state.speechElements[role] = element;
     const source = state.audioContext.createMediaElementSource(element);
     source.connect(state.analyser);
@@ -436,10 +452,13 @@ function drawStage() {
   const canvas=$('#stage'),ctx=canvas.getContext('2d');if(!ctx)return;const W=canvas.width,H=canvas.height,s=W/1280;ctx.save();ctx.scale(s,s);const bg=state.current?.settings.background||'#101c24',accent=state.current?.settings.accent||'#80ded1';ctx.fillStyle=bg;ctx.fillRect(0,0,1280,720);
   const gradient=ctx.createRadialGradient(640,350,10,640,350,800);gradient.addColorStop(0,'#26545044');gradient.addColorStop(1,'#00000000');ctx.fillStyle=gradient;ctx.fillRect(0,0,1280,720);
   ctx.fillStyle=accent;ctx.font='bold 13px Arial';ctx.letterSpacing='3px';ctx.fillText('THE SALES FORGE',51,48);ctx.letterSpacing='0px';ctx.fillStyle='#bbd2cc';ctx.font='14px Arial';ctx.fillText((state.current?.outline.subject||'LIVE PODCAST').slice(0,105),51,81);
-  const active=state.screen.type!=='idle';const stage=state.current?.settings.layout==='stage';const cx1=active?(stage?180:320):390,cx2=active?(stage?180:960):890,y1=active?(stage?252:225):310,y2=active?(stage?485:225):310,r=active?(stage?93:100):150;
-  const glow=state.current?.settings.glowStrength||1;
-  drawPersona(ctx,episodePerson(state.current,'host'),'HOST',state.hostImage,cx1,y1,r,state.speaker==='host',accent,glow);
-  drawPersona(ctx,episodePerson(state.current,'guest'),'GUEST',state.guestImage,cx2,y2,r,state.speaker==='guest',state.current?.settings.guestAccent||'#efbe9e',glow);
+  const active=state.screen.type!=='idle';const stage=state.current?.settings.layout==='stage';const glow=state.current?.settings.glowStrength||1;
+  const roles=castRoles(state.current||{});const n=roles.length;
+  roles.forEach((role,i)=>{let x,y,r;
+    if(!active){r=n<=2?150:n===3?112:n===4?92:78;x=n<=2?(i===0?390:890):1280/(n+1)*(i+1);y=310}
+    else if(stage){r=Math.min(93,Math.floor(470/n/2.7));x=180;y=n<=2?(i===0?252:485):130+(470/(n-1||1))*i}
+    else{r=n<=2?100:Math.min(80,Math.floor(1280/(n+1)/2.8));x=n<=2?(i===0?320:960):1280/(n+1)*(i+1);y=225}
+    drawPersona(ctx,episodePerson(state.current,role),roleLabel(role),state.roleImages[role],x,y,r,state.speaker===role,roleAccent(state.current?.settings,role),glow)});
   if(active){const w=Math.round(1280*(state.current?.settings.paneWidth||66)/100),x=stage?1280-w-55:(1280-w)/2,y=stage?116:405,h=stage?500:235;ctx.fillStyle='#10242b';rounded(ctx,x,y,w,h,16);ctx.fill();ctx.strokeStyle='#487068';ctx.lineWidth=2;ctx.stroke();ctx.fillStyle=accent;ctx.font='bold 13px Arial';ctx.fillText((state.screen.title||'SANDBOX').slice(0,70),x+22,y+31);ctx.fillStyle='#a9c8c2';ctx.font='13px Arial';const visual=state.screenVideoElement&&state.screenVideoElement.readyState>=2?state.screenVideoElement:state.screenImage&&state.screen.image?state.screenImage:null;if(visual){try{const maxW=w-40,maxH=h-67,scale=Math.min(maxW/visual.videoWidth||maxW/visual.width,maxH/visual.videoHeight||maxH/visual.height),vw=visual.videoWidth||visual.width,vh=visual.videoHeight||visual.height,iw=vw*scale,ih=vh*scale;ctx.drawImage(visual,x+20+(maxW-iw)/2,y+49+(maxH-ih)/2,iw,ih)}catch{}}else wrap(ctx,state.screen.content||'Working…',x+22,y+67,w-44,21,Math.floor((h-65)/21));}
   drawCaption(ctx);ctx.fillStyle='#789b97';ctx.font='11px Arial';ctx.fillText('UNSCRIPTED · ONE CONTINUOUS TAKE',52,678);ctx.fillStyle='#ef8074';ctx.beginPath();ctx.arc(1179,44,5,0,Math.PI*2);ctx.fill();ctx.fillStyle='#b8d7cf';ctx.fillText('REC',1193,48);ctx.restore();
 }
@@ -585,6 +604,8 @@ $('#personaForm').elements.imageFile.addEventListener('change',event=>{const fil
 $('#personaForm').elements.knowledgeFiles.addEventListener('change',event=>{$('#knowledgeList').textContent=[...$('#personaForm')._knowledge.map(k=>k.name),...[...event.target.files].map(f=>f.name)].join(' · ')});
 $('#speechProvider').addEventListener('change',()=>{updateVoiceSuggestions();$('#voiceSelect').value=state.config?.providers.voices?.[$('#speechProvider').value]?.[0]||''});
 $('#episodeForm').elements.interjectProbability.addEventListener('input',event=>{$('#interjectValue').textContent=`${event.target.value}%`});
+$('#episodeForm').elements.maxInterruptions.addEventListener('input',event=>{$('#maxInterruptionsValue').textContent=`${event.target.value} per episode`});
+$('#episodeForm').elements.musicVolume.addEventListener('input',event=>{$('#musicVolumeValue').textContent=`${event.target.value}%`});
 $('#episodeForm').elements.paneWidth.addEventListener('input',event=>{$('#paneValue').textContent=`${event.target.value}%`});
 $('#episodeForm').elements.authRequired.addEventListener('change',event=>{$('#episodeCredentials').classList.toggle('hidden',!event.target.checked);for(const name of ['demoUsername','demoPassword'])$('#episodeForm').elements[name].required=event.target.checked});
 document.addEventListener('click',event=>{const ep=event.target.closest('[data-episode]');if(ep&&!event.target.closest('button,a'))openStudio(ep.dataset.episode).catch(e=>notice(e.message));const edit=event.target.closest('button[data-edit]');if(edit)openPersona(person(edit.dataset.edit))});

@@ -7,13 +7,15 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { initStore, listPersonas, listEpisodes, persona, episode, episodeState, episodeEventsAfter, addPersona, updatePersona, deletePersona, addEpisode, putAsset, save, setEpisodeFields, acknowledgeEpisodeSpeech, assets, usesRemoteAssets, uid, stamp, account, reserveCredits, listExplainers, explainer, saveExplainer, setExplainerFields, assetOwnedBy, copyEpisodeForRestart, copyExplainerForRestart } from './lib/store.mjs';
+import { initStore, listPersonas, listEpisodes, persona, episode, episodeState, episodeEventsAfter, addPersona, updatePersona, deletePersona, addEpisode, putAsset, save, setEpisodeFields, acknowledgeEpisodeSpeech, assets, usesRemoteAssets, uid, stamp, account, reserveCredits, listExplainers, explainer, saveExplainer, setExplainerFields, assetOwnedBy, copyEpisodeForRestart, copyExplainerForRestart, recordUpload } from './lib/store.mjs';
 import { authenticate, primaryEmail } from './lib/auth.mjs';
 import { costs, createCheckout, createPortal, isPaid, processStripeWebhook, publicPlans } from './lib/billing.mjs';
 import { availableProviders, supportedVoice } from './lib/providers.mjs';
 import { runEpisode, stopEpisode } from './lib/engine.mjs';
 import { openLiveAudio } from './lib/audio.mjs';
-import { buildIndex } from './lib/rag.mjs';
+import { buildIndex, embedIndex } from './lib/rag.mjs';
+import { createHash } from 'node:crypto';
+import { CAST_ROLES, DEFAULT_VOICES, DEFAULT_ACCENTS } from './lib/cast.mjs';
 import { assertPublicHttpUrl } from './lib/url-security.mjs';
 import { environmentReport } from './lib/environment.mjs';
 
@@ -64,6 +66,12 @@ async function launchEpisode(res, item) {
   json(res, 202, { ok: true });
   setImmediate(async () => runEpisode(await episode(item.id), publish, waitForAck).catch(console.error));
 }
+// Knowledge is re-embedded only when its content changes.
+async function knowledgeIndexFor(knowledge, existing = null) {
+  const signature = createHash('sha256').update(JSON.stringify(knowledge.map(file => [file.name, file.text]))).digest('hex');
+  if (existing?.knowledgeSignature === signature && Array.isArray(existing.knowledgeIndex)) return { knowledgeIndex: existing.knowledgeIndex, knowledgeSignature: signature };
+  return { knowledgeIndex: await embedIndex(buildIndex(knowledge)), knowledgeSignature: signature };
+}
 async function cleanPersona(input) {
   const name = String(input.name || '').trim().slice(0, 80);
   const systemPrompt = String(input.systemPrompt || '').trim().slice(0, 12000);
@@ -77,7 +85,7 @@ async function cleanPersona(input) {
     if (bytes.length > 3_000_000) throw new Error('Display images must be under 3 MB.');
     image = await putAsset(`persona.${match[1] === 'jpeg' ? 'jpg' : match[1]}`, bytes);
   } else if (image && !/^\/assets\/[a-zA-Z0-9._-]+$/.test(image)) throw new Error('Invalid display image path.');
-  return { name, systemPrompt, knowledge, knowledgeIndex: buildIndex(knowledge), image, modelProvider: String(input.modelProvider || 'gateway'), model: String(input.model || '').slice(0, 80), speechProvider: String(input.speechProvider || (process.env.OPENAI_API_KEY ? 'openai' : 'gateway')), voice: String(input.voice || 'alloy').slice(0, 100) };
+  return { name, systemPrompt, knowledge, image, modelProvider: String(input.modelProvider || 'gateway'), model: String(input.model || '').slice(0, 80), speechProvider: String(input.speechProvider || (process.env.OPENAI_API_KEY ? 'openai' : 'gateway')), voice: String(input.voice || 'alloy').slice(0, 100), voiceStyle: String(input.voiceStyle || '').trim().slice(0, 300) };
 }
 const mime = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.webm': 'video/webm', '.mp4': 'video/mp4', '.txt': 'text/plain' };
 async function staticFile(req, res, base, filename) {
@@ -172,6 +180,20 @@ export async function handler(req, res) {
     }
     if (parts[0] === 'assets' && req.method === 'GET') { const filename = parts.slice(1).join('/'); if (!await assetOwnedBy(auth.userId, filename)) return error(res, 404, 'Asset not found'); return assetFile(req, res, filename); }
     if (parts[0] === 'api' && parts[1] === '_assets' && req.method === 'GET') { const filename = parts.slice(2).join('/'); if (!await assetOwnedBy(auth.userId, filename)) return error(res, 404, 'Asset not found'); return assetFile(req, res, filename); }
+    // Small media uploads (music beds, brand logos). Returns an owner-scoped asset path.
+    if (url.pathname === '/api/uploads' && req.method === 'POST') {
+      const kind = String(url.searchParams.get('kind') || '');
+      const name = String(url.searchParams.get('name') || 'upload').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80);
+      const rules = { music: { pattern: /\.(mp3|wav|m4a|ogg)$/i, limit: 15_000_000 }, logo: { pattern: /\.(png|jpe?g|webp|svg)$/i, limit: 2_000_000 } }[kind];
+      if (!rules) return error(res, 400, 'Upload kind must be music or logo.');
+      if (!rules.pattern.test(name)) return error(res, 400, kind === 'music' ? 'Upload an MP3, WAV, M4A, or OGG file.' : 'Upload a PNG, JPEG, WebP, or SVG logo.');
+      const data = await rawBody(req, rules.limit);
+      if (!data.length) return error(res, 400, 'The file is empty.');
+      if (/\.svg$/i.test(name) && /<script|on[a-z]+\s*=|javascript:/i.test(data.toString('utf8'))) return error(res, 400, 'SVG logos cannot contain scripts.');
+      const asset = await putAsset(`${kind}-${name}`, data);
+      await recordUpload(auth.userId, asset, kind);
+      return json(res, 201, { asset });
+    }
     if (url.pathname === '/api/extract' && req.method === 'POST') {
       const filename = String(url.searchParams.get('name') || '');
       const file = await rawBody(req);
@@ -194,13 +216,14 @@ export async function handler(req, res) {
     if (url.pathname === '/api/personas' && req.method === 'GET') return json(res, 200, await listPersonas(auth.userId));
     if (url.pathname === '/api/personas' && req.method === 'POST') {
       const input = await cleanPersona(await body(req));
-      const item = { ...input, id: uid(), ownerId: auth.userId, createdAt: stamp() };
+      const item = { ...input, ...await knowledgeIndexFor(input.knowledge), id: uid(), ownerId: auth.userId, createdAt: stamp() };
       await addPersona(item); return json(res, 201, item);
     }
     if (parts[0] === 'api' && parts[1] === 'personas' && parts[2] && req.method === 'PUT') {
       const existing = await persona(parts[2]);
       if (!existing || existing.ownerId !== auth.userId) return error(res, 404, 'Persona not found');
-      const item = await updatePersona(parts[2], await cleanPersona(await body(req)));
+      const input = await cleanPersona(await body(req));
+      const item = await updatePersona(parts[2], { ...input, ...await knowledgeIndexFor(input.knowledge, existing) });
       return item ? json(res, 200, item) : error(res, 404, 'Persona not found');
     }
     if (parts[0] === 'api' && parts[1] === 'personas' && parts[2] && req.method === 'DELETE') {
@@ -211,9 +234,19 @@ export async function handler(req, res) {
     if (url.pathname === '/api/episodes' && req.method === 'GET') return json(res, 200, (await listEpisodes(auth.userId)).map(({ events, ...rest }) => rest));
     if (url.pathname === '/api/episodes' && req.method === 'POST') {
       const input = await body(req);
-      const hostPersona = await persona(input.hostId), guestPersona = await persona(input.guestId);
-      if (!hostPersona || !guestPersona || hostPersona.ownerId !== auth.userId || guestPersona.ownerId !== auth.userId) throw new Error('Select a valid host and guest.');
-      if (input.hostId === input.guestId) throw new Error('Host and guest must be different personas.');
+      // Cast: host + guest are required; co-host and up to two more guests are optional.
+      const castIds = { host: input.hostId, guest: input.guestId, cohost: input.cohostId, guest2: input.guest2Id, guest3: input.guest3Id };
+      const cast = {};
+      for (const role of CAST_ROLES) {
+        const id = String(castIds[role] || '');
+        if (!id) continue;
+        const selected = await persona(id);
+        if (!selected || selected.ownerId !== auth.userId) throw new Error(`Select a valid ${role === 'cohost' ? 'co-host' : role}.`);
+        cast[role] = selected;
+      }
+      if (!cast.host || !cast.guest) throw new Error('Select a valid host and guest.');
+      const castPersonaIds = Object.values(cast).map(entry => entry.id);
+      if (new Set(castPersonaIds).size !== castPersonaIds.length) throw new Error('Each role needs a different persona.');
       const subject = String(input.outline?.subject || '').trim().slice(0, 200);
       if (!subject) throw new Error('The subject is required.');
       const validColor = (color, fallback) => /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
@@ -223,21 +256,36 @@ export async function handler(req, res) {
       const authRequired = !!input.settings?.demo?.authRequired;
       const demoLoginUrl = String(input.settings?.demo?.loginUrl || '').trim().slice(0, 1000);
       if (demoLoginUrl) await assertPublicHttpUrl(demoLoginUrl);
-      const episodeHost = structuredClone(hostPersona), episodeGuest = structuredClone(guestPersona);
-      const hostProvider = episodeHost.speechProvider || 'gateway', guestProvider = episodeGuest.speechProvider || 'gateway';
-      episodeHost.voice = supportedVoice(hostProvider, episodeHost.voice, 'coral');
-      episodeGuest.voice = supportedVoice(guestProvider, episodeGuest.voice, 'nova');
-      if (hostProvider === guestProvider && episodeHost.voice === episodeGuest.voice) {
-        const choices = availableProviders().voices[guestProvider] || [];
-        episodeGuest.voice = choices.find(voice => voice !== episodeHost.voice) || episodeGuest.voice;
+      // Snapshot each persona into the episode and make sure no two cast members share a voice.
+      const personas = {};
+      const usedVoices = new Set();
+      for (const role of CAST_ROLES) {
+        if (!cast[role]) continue;
+        const snapshot = structuredClone(cast[role]);
+        const provider = snapshot.speechProvider || 'gateway';
+        snapshot.voice = supportedVoice(provider, snapshot.voice, DEFAULT_VOICES[role]);
+        if (usedVoices.has(`${provider}:${snapshot.voice}`)) snapshot.voice = (availableProviders().voices[provider] || []).find(voice => !usedVoices.has(`${provider}:${voice}`)) || snapshot.voice;
+        usedVoices.add(`${provider}:${snapshot.voice}`);
+        personas[role] = snapshot;
       }
+      const accents = Object.fromEntries(CAST_ROLES.filter(role => personas[role]).map(role => [role, validColor(input.settings?.accents?.[role] || (role === 'host' ? input.settings?.accent : role === 'guest' ? input.settings?.guestAccent : ''), DEFAULT_ACCENTS[role])]));
+      const music = input.settings?.music || {};
       const item = {
-        id: uid(), ownerId: auth.userId, createdAt: stamp(), status: 'draft', hostId: input.hostId, guestId: input.guestId,
-        personas: { host: episodeHost, guest: episodeGuest },
+        id: uid(), ownerId: auth.userId, createdAt: stamp(), status: 'draft', hostId: cast.host.id, guestId: cast.guest.id,
+        ...(cast.cohost ? { cohostId: cast.cohost.id } : {}), ...(cast.guest2 ? { guest2Id: cast.guest2.id } : {}), ...(cast.guest3 ? { guest3Id: cast.guest3.id } : {}),
+        personas,
         outline: { subject, angle: String(input.outline?.angle || '').slice(0, 500), points: String(input.outline?.points || '').slice(0, 2500) },
         settings: {
           interjections: input.settings?.interjections !== false,
           interjectProbability: Math.max(0, Math.min(.25, Number(input.settings?.interjectProbability) || 0)),
+          maxInterruptions: Math.max(0, Math.min(12, Number.isFinite(Number(input.settings?.maxInterruptions)) ? Number(input.settings.maxInterruptions) : 4)),
+          targetMinutes: [0, 3, 5, 8, 12, 20, 30, 45].includes(Number(input.settings?.targetMinutes)) ? Number(input.settings.targetMinutes) : 0,
+          accents,
+          music: {
+            intro: music.intro !== false, outro: music.outro !== false, bed: !!music.bed,
+            volume: Math.max(0.02, Math.min(0.3, Number(music.volume) || 0.08)),
+            track: /^\/assets\/[a-zA-Z0-9._-]+\.(mp3|wav|m4a|ogg)$/.test(String(music.track || '')) ? music.track : ''
+          },
           hostTools: !!input.settings?.hostTools,
           requireGuestDemo: input.settings?.requireGuestDemo !== false,
           demo: {
@@ -254,8 +302,8 @@ export async function handler(req, res) {
           height: fullHD ? 1080 : 720,
           outputFormat: ['both','mp4','webm'].includes(input.settings?.outputFormat) ? input.settings.outputFormat : 'both',
           captionStyle: ['studio','minimal','bold'].includes(input.settings?.captionStyle) ? input.settings.captionStyle : 'studio',
-          accent: validColor(input.settings?.accent, '#80ded1'),
-          guestAccent: validColor(input.settings?.guestAccent, '#efbe9e'),
+          accent: accents.host,
+          guestAccent: accents.guest,
           background: validColor(input.settings?.background, '#101c24'),
           glowStrength: Math.max(.5, Math.min(1.8, Number(input.settings?.glowStrength) || 1)),
           paneWidth: Math.max(55, Math.min(72, Number(input.settings?.paneWidth) || 66)),

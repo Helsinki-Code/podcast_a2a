@@ -72,7 +72,8 @@ test('repeated failures before anything usable fail the episode', async () => {
 test('a line whose voice fails is skipped without ending the episode', async () => {
   const item = episode({});
   let failed = false;
-  const { io, calls } = fakeIo(item, [{ segments: [{ type: 'speak', text: 'First line. Second line.' }] }, { segments: [{ type: 'speak', text: guestAnswer }] }], {
+  const first = 'First block of the opening, with enough words that the host line has to be voiced in two separate requests because it runs well past the forty eight word limit for one natural block of host speech in this show.';
+  const { io, calls } = fakeIo(item, [{ segments: [{ type: 'speak', text: `${first} Second block closes the opening with a question for the guest about the product?` }] }, { segments: [{ type: 'speak', text: guestAnswer }] }], {
     prepareSpeech: async (id, role, text) => { if (!failed && text.startsWith('First')) { failed = true; throw new Error('TTS 500'); } return { audio: '/api/audio/x' }; }
   });
   await conversationLoop('ep', io);
