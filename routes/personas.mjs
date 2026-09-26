@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { listPersonas, persona, addPersona, updatePersona, deletePersona, putAsset, uid, stamp, recordUpload } from '../lib/store.mjs';
-import { buildIndex, embedIndex, indexStats, retrieveHybrid } from '../lib/rag.mjs';
+import { buildIndex, indexStats } from '../lib/rag.mjs';
+import { embedIndex, retrieveHybrid } from '../lib/rag-semantic.mjs';
 import { modelProviders, speechProviders, supportedVoice } from '../lib/providers.mjs';
 import { publicFetch } from '../lib/url-security.mjs';
 import { htmlToText } from '../lib/html-text.mjs';

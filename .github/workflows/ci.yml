@@ -22,3 +22,5 @@ jobs:
         run: npx playwright-core install --with-deps chromium
       - run: npm run lint
       - run: npm test
+      - name: Production build (catches bad dynamic imports and Node modules in workflow code)
+        run: npm run build

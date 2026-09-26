@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { nextSpeaker, castRoles, roleAccent } from '../lib/cast.mjs';
 import { episodePhase, interjectionTrigger, ownContext, transcriptForPrompt } from '../lib/conversation.mjs';
 import { interruptionAllowed } from '../lib/conversation-loop.mjs';
-import { buildIndex, embedIndex, retrieveHybrid, setEmbedder, indexStats } from '../lib/rag.mjs';
+import { buildIndex, indexStats } from '../lib/rag.mjs';
+import { embedIndex, retrieveHybrid, setEmbedder } from '../lib/rag-semantic.mjs';
 import { finalAudioGraph, stageHtml, titleCardHtml, interruptionFadeFilter } from '../lib/podcast-media.mjs';
 import { podcastTimeline, podcastCaptions } from '../lib/podcast-timeline.mjs';
 

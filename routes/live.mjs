@@ -26,7 +26,7 @@ export function waitForAck(id, eventId, isStopped) {
 }
 export async function launchEpisode(res, item) {
   if (process.env.VERCEL) {
-    const [{ start }, { episodeWorkflow }] = await Promise.all([import('workflow/api'), import('./workflows/episode.mjs')]);
+    const [{ start }, { episodeWorkflow }] = await Promise.all([import('workflow/api'), import('../workflows/episode.mjs')]);
     const run = await start(episodeWorkflow, [item.id]);
     await setEpisodeFields(item.id, { workflowRunId: run.runId });
     return json(res, 202, { ok: true, runId: run.runId });

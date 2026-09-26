@@ -3,7 +3,7 @@ import { enterUsage } from '../lib/usage.mjs';
 import { episodeState, appendEpisodeEvent, setEpisodeFields, stamp, uid, putNamedAsset, refundCredits } from '../lib/store.mjs';
 import { modelProviders, speechProviders, supportedVoice } from '../lib/providers.mjs';
 import { ownContext, transcriptForPrompt } from '../lib/conversation.mjs';
-import { retrieveHybrid } from '../lib/rag.mjs';
+import { retrieveHybrid } from '../lib/rag-semantic.mjs';
 import { DEFAULT_VOICES, isGuestRole } from '../lib/cast.mjs';
 import { modelFor } from '../lib/models.mjs';
 import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';

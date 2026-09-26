@@ -157,7 +157,7 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
         const input = await body(req, 12000);
         const credentials = { username: String(input.credentials?.username || '').slice(0, 500), password: String(input.credentials?.password || '').slice(0, 2000) };
         if (!credentials.username || !credentials.password) return error(res, 400, 'Sign in to the demo platform again so the guest can finish the demonstration.');
-        const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
+        const { VercelEpisodeSandbox } = await import('../lib/vercel-sandbox.mjs');
         await new VercelEpisodeSandbox(item.id, () => {}).login(item.settings.demo, credentials);
       }
       const attempt = (Number(item.attempt) || 1) + 1;
@@ -174,7 +174,7 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
       const reference = `${item.id}:render-${attempt}`;
       if (!await reserveCredits(auth.userId, costs.podcast, 'podcast', reference)) return error(res, 402, `Rendering this podcast needs ${costs.podcast} credits.`);
       await setEpisodeFields(item.id, { videoStatus: 'processing', videoError: null, creditsCharged: costs.podcast, creditReference: reference, renderAttempt: attempt });
-      const [{ start }, { podcastRenderWorkflow }] = await Promise.all([import('workflow/api'), import('./workflows/podcast-render.mjs')]);
+      const [{ start }, { podcastRenderWorkflow }] = await Promise.all([import('workflow/api'), import('../workflows/podcast-render.mjs')]);
       const run = await start(podcastRenderWorkflow, [item.id]);
       await setEpisodeFields(item.id, { videoWorkflowRunId: run.runId });
       return json(res, 202, { ok: true, runId: run.runId });
@@ -185,21 +185,21 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
       const input = await body(req, 12000);
       const credentials = { username: String(input.credentials?.username || '').slice(0, 500), password: String(input.credentials?.password || '').slice(0, 2000) };
       if (!credentials.username || !credentials.password) return error(res, 400, 'Login username and password are required for this platform demo.');
-      const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
+      const { VercelEpisodeSandbox } = await import('../lib/vercel-sandbox.mjs');
       await new VercelEpisodeSandbox(item.id, () => {}).login(item.settings.demo, credentials);
       await setEpisodeFields(item.id, { demoPrepared: true });
       return json(res, 200, { ok: true });
     }
     if (parts[3] === 'desktop' && req.method === 'GET') {
       if (item.status !== 'draft') return error(res, 409, 'The secure desktop is available while the episode is a draft.');
-      const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
+      const { VercelEpisodeSandbox } = await import('../lib/vercel-sandbox.mjs');
       const liveUrl = await new VercelEpisodeSandbox(item.id, () => {}).interactiveDesktop(item.settings.demo?.loginUrl || item.settings.demo?.url);
       if (!liveUrl) return error(res, 409, 'The visible Computer Use desktop is not configured.');
       return json(res, 200, { liveUrl });
     }
     if (parts[3] === 'desktop-ready' && req.method === 'POST') {
       if (item.status !== 'draft' || !item.settings.demo?.authRequired) return error(res, 409, 'This episode does not need manual browser preparation.');
-      const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
+      const { VercelEpisodeSandbox } = await import('../lib/vercel-sandbox.mjs');
       const screen = await new VercelEpisodeSandbox(item.id, () => {}).capture(null, item.settings.demo.url);
       await setEpisodeFields(item.id, { demoPrepared: true, manualDesktopPrepared: true });
       return json(res, 200, { ok: true, screen: { title: screen.title, image: screen.image } });
@@ -209,7 +209,7 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
       const speech = item.events.find(event => event.id === data.eventId && event.type === 'speech');
       if (speech) await acknowledgeEpisodeSpeech(item.id, data.eventId);
       if (process.env.VERCEL && speech) {
-        const { playbackHook, playbackToken } = await import('./workflows/episode.mjs');
+        const { playbackHook, playbackToken } = await import('../workflows/episode.mjs');
         try { await playbackHook.resume(playbackToken(item.id, data.eventId), { played: true }); } catch (cause) {
           if (!/not found|already|completed/i.test(cause.message)) throw cause;
         }
@@ -221,7 +221,7 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
         await setEpisodeFields(item.id, { stopRequested: true, status: 'stopped', endedAt: stamp() });
         const pending = [...item.events].reverse().find(event => event.type === 'speech' && !event.acknowledged);
         if (pending) {
-          const { playbackHook, playbackToken } = await import('./workflows/episode.mjs');
+          const { playbackHook, playbackToken } = await import('../workflows/episode.mjs');
           try { await playbackHook.resume(playbackToken(item.id, pending.id), { stopped: true }); } catch {}
         }
         return json(res, 200, { stopped: true });
@@ -240,7 +240,7 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
       item.videoStatus = item.settings.outputFormat === 'webm' ? 'complete' : 'processing';
       await save(item);
       if (item.settings.outputFormat !== 'webm') {
-        const [{ start }, { podcastVideoWorkflow }] = await Promise.all([import('workflow/api'), import('./workflows/podcast-video.mjs')]);
+        const [{ start }, { podcastVideoWorkflow }] = await Promise.all([import('workflow/api'), import('../workflows/podcast-video.mjs')]);
         const run = await start(podcastVideoWorkflow, [item.id, pathname]);
         await setEpisodeFields(item.id, { videoWorkflowRunId: run.runId });
       }

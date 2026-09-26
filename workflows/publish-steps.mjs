@@ -9,8 +9,8 @@ import { toSrt, toVtt } from '../lib/publishing.mjs';
 import { podcastTimeline } from '../lib/podcast-timeline.mjs';
 import { DEFAULT_VOICES } from '../lib/cast.mjs';
 import { modelFor } from '../lib/models.mjs';
-import { assemblePodcast } from './podcast-render-steps.mjs';
-import { revoiceScenes, mixExplainer } from './explainer-steps.mjs';
+import { assemblePodcast } from '../lib/podcast-assembly.mjs';
+import { revoiceScenes, mixExplainer } from '../lib/explainer-mix.mjs';
 
 // Follow-up media jobs on a finished podcast or explainer: vertical shorts, translated captions,
 // and dubbed variants. Each job records its own status so it never disturbs the main video.

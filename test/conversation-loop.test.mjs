@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { conversationLoop, nextRoleAfter, runConversation } from '../lib/conversation-loop.mjs';
 import { friendlyError } from '../public/errors.js';
-import { podcastOutputSpec } from '../workflows/podcast-render-steps.mjs';
+import { podcastOutputSpec } from '../lib/podcast-assembly.mjs';
 
 const guestAnswer = 'The dashboard groups every campaign by stage, so a rep can see which accounts need attention first and act on them without digging through separate reports or spreadsheets every single morning.';
 

@@ -83,21 +83,21 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
         passwordSelector: String(input.passwordSelector || item.passwordSelector || '').slice(0, 400),
         submitSelector: String(input.submitSelector || item.submitSelector || '').slice(0, 400)
       };
-      const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
+      const { VercelEpisodeSandbox } = await import('../lib/vercel-sandbox.mjs');
       await new VercelEpisodeSandbox(item.id, () => {}).login(login, credentials);
       await setExplainerFields(item.id, { ...login, browserPrepared: true, progress: 'Secure browser prepared', error: null });
       return json(res, 200, { ok: true });
     }
     if (parts[3] === 'desktop' && req.method === 'GET') {
       if (item.status !== 'draft') return error(res, 409, 'The secure desktop is available while the explainer is a draft.');
-      const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
+      const { VercelEpisodeSandbox } = await import('../lib/vercel-sandbox.mjs');
       const liveUrl = await new VercelEpisodeSandbox(item.id, () => {}).interactiveDesktop(item.loginUrl || item.url);
       if (!liveUrl) return error(res, 409, 'The visible Computer Use desktop is not configured.');
       return json(res, 200, { liveUrl });
     }
     if (parts[3] === 'desktop-ready' && req.method === 'POST') {
       if (item.status !== 'draft' || !item.authRequired) return error(res, 409, 'This explainer does not need manual browser preparation.');
-      const { VercelEpisodeSandbox } = await import('./lib/vercel-sandbox.mjs');
+      const { VercelEpisodeSandbox } = await import('../lib/vercel-sandbox.mjs');
       const screen = await new VercelEpisodeSandbox(item.id, () => {}).capture(null, item.url);
       await setExplainerFields(item.id, { browserPrepared: true, manualDesktopPrepared: true, progress: 'Secure browser prepared', error: null });
       return json(res, 200, { ok: true, screen: { title: screen.title, image: screen.image } });
@@ -106,7 +106,7 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
       if (!['draft','awaiting_approval'].includes(item.status)) return error(res, 409, 'The scene plan can only be drafted before recording.');
       if (item.authRequired && !item.browserPrepared) return error(res, 409, 'Prepare the authenticated browser first.');
       await setExplainerFields(item.id, { status: 'planning', progress: 'Drafting the scene plan', error: null });
-      const { explainerPlanWorkflow } = await import('./workflows/explainer.mjs');
+      const { explainerPlanWorkflow } = await import('../workflows/explainer.mjs');
       if (process.env.VERCEL) {
         const { start } = await import('workflow/api');
         const run = await start(explainerPlanWorkflow, [item.id]);
@@ -118,7 +118,7 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
     }
     if (parts[3] === 'plan' && req.method === 'PUT') {
       if (item.status !== 'awaiting_approval') return error(res, 409, 'There is no scene plan waiting for review.');
-      const { normalizePlan } = await import('./workflows/explainer-steps.mjs');
+      const { normalizePlan } = await import('../workflows/explainer-steps.mjs');
       const scenes = normalizePlan(await body(req, 60_000), 20);
       if (!scenes.length) return error(res, 400, 'Keep at least one scene with narration.');
       await setExplainerFields(item.id, { plan: { ...item.plan, scenes, approved: false, editedAt: stamp() } });
@@ -145,7 +145,7 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
           wordsPerCue: Math.max(3, Math.min(10, Number(captionInput.wordsPerCue) || 7))
         }
       });
-      const { explainerRerenderWorkflow } = await import('./workflows/explainer.mjs');
+      const { explainerRerenderWorkflow } = await import('../workflows/explainer.mjs');
       if (process.env.VERCEL) {
         const { start } = await import('workflow/api');
         const run = await start(explainerRerenderWorkflow, [item.id]);
@@ -161,7 +161,7 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
       if (item.authRequired && !item.browserPrepared) return error(res, 409, 'Prepare the authenticated browser first.');
       if (!await reserveCredits(auth.userId, costs.explainer, 'explainer', item.id)) return error(res, 402, `This explainer needs ${costs.explainer} credits.`);
       await setExplainerFields(item.id, { status: 'queued', progress: 'Queued', creditsCharged: costs.explainer });
-      const { explainerWorkflow } = await import('./workflows/explainer.mjs');
+      const { explainerWorkflow } = await import('../workflows/explainer.mjs');
       if (process.env.VERCEL) {
         const { start } = await import('workflow/api');
         const run = await start(explainerWorkflow, [item.id]);
