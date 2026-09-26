@@ -5,6 +5,7 @@ const rules = [
   [/login|sign[- ]?in|password|credential|mfa|captcha/i, 'The demo platform sign-in did not finish', 'Check the username and password, or open the secure desktop to finish sign-in (MFA, CAPTCHA) yourself.'],
   [/public|private network|local address|http:\/\/ or https:\/\//i, 'That address can’t be opened', 'Use a public https:// URL. Local, intranet, and private-network addresses are blocked for safety.'],
   [/could not reach|ENOTFOUND|ECONNREFUSED|timed? ?out|net::ERR|navigation/i, 'The app couldn’t be reached', 'Check the URL opens in your own browser, then retry. If the site blocks automated browsers, try a different start page.'],
+  [/serialization|recording workflow/i, 'The recording workflow stopped', 'Restart the episode. If it already recorded speech, Resume continues from the last line. Failed-run credits are refunded.'],
   [/playback|acknowledge|live player/i, 'The live player stopped responding', 'Keep this tab open while recording, or choose Background generation so the episode continues without it.'],
   [/not a JSON object|No object generated|could not parse|invalid .*plan/i, 'The AI returned an unusable reply', 'This is usually temporary. Resume or retry; the conversation so far is kept.'],
   [/voice|speech|tts/i, 'A voice line could not be generated', 'Retry in a minute. If it keeps failing, pick a different voice for the persona.'],
@@ -12,7 +13,6 @@ const rules = [
   [/frozen|silence|quality check|MP4|render|ffmpeg|captions/i, 'The finished video failed its quality check', 'Retry the render. Your recorded conversation is kept and you are not charged twice.'],
   [/sandbox|desktop|Computer Use/i, 'The recording computer had a problem', 'Retry. If it repeats, the recording environment may be busy; wait a few minutes.'],
   [/too short|too long|fragment/i, 'An AI answer didn’t meet the length rules', 'Resume the episode; the guest will be asked to answer again.'],
-  [/recording workflow/i, 'The recording stopped unexpectedly', 'Resume the episode to continue from the last line; unused credits were refunded.']
 ];
 
 export function friendlyError(message) {

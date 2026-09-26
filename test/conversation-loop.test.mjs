@@ -39,6 +39,20 @@ test('live mode waits for playback of every line', async () => {
   assert.equal(calls.waiters, calls.published.length);
 });
 
+test('durable live mode publishes and waits without binding the workflow adapter as this', async () => {
+  const item = episode({});
+  const { io, calls } = fakeIo(item, [{ segments: [{ type: 'speak', text: 'Welcome to the show.' }] }, { segments: [{ type: 'speak', text: guestAnswer }] }]);
+  io.publishSpeechAndWait = async function (id, role, text) {
+    assert.equal(this, undefined, 'workflow callbacks must not receive the function-bearing adapter as thisVal');
+    calls.published.push({ role, text, acknowledged: false });
+    item.turns.push({ role, text });
+    return { played: true };
+  };
+  await conversationLoop('ep', io);
+  assert.equal(calls.waiters, 0, 'the durable path does not return wait/dispose closures');
+  assert.ok(calls.published.length >= 3);
+});
+
 test('a failed turn is regenerated with a hint, then handed to the other persona', async () => {
   const item = episode({});
   const { io, calls } = fakeIo(item, [new Error('No object generated: could not parse the response.'), new Error('still broken'), { segments: [{ type: 'speak', text: guestAnswer }] }]);
@@ -91,6 +105,7 @@ test('resume continues with the persona who did not speak last', () => {
 test('friendly errors explain common failures with a next step', () => {
   assert.equal(friendlyError(''), null);
   assert.match(friendlyError('Playback client did not acknowledge speech within five minutes.').hint, /Background/);
+  assert.equal(friendlyError('The recording workflow failed: Failed to serialize step arguments at .thisVal.playbackWaiter').title, 'The recording workflow stopped');
   assert.match(friendlyError('This podcast needs 20 credits.').title, /credits/);
   assert.match(friendlyError('Podcast quality check failed: frozen video').title, /quality/);
   assert.equal(friendlyError('weird').title, 'Something went wrong');

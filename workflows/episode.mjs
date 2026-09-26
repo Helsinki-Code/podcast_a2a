@@ -6,21 +6,23 @@ import { renderPodcastTimeline, failPodcastRender } from './podcast-render-steps
 export const playbackHook = defineHook();
 export const playbackToken = (episodeId, eventId) => `podcast:${episodeId}:${eventId}`;
 
-// The hook is created before the speech is published so an acknowledgement can never arrive first.
-async function playbackWaiter(episodeId, eventId) {
+// Keep hook creation, speech publication, and acknowledgement waiting inside one workflow
+// function. Returning closures from a workflow function is not serializable, and calling a
+// callback through an object would make Workflow try to serialize that object as `thisVal`.
+async function publishSpeechAndWait(episodeId, role, text, eventId, prepared, sources = []) {
   const hook = playbackHook.create({ token: playbackToken(episodeId, eventId) });
   const conflict = await hook.getConflict();
   if (conflict) throw new Error(`Playback hook is already owned by run ${conflict.runId}.`);
-  return {
-    wait: () => Promise.race([hook, sleep('5m').then(() => ({ timeout: true }))]),
-    dispose: () => hook.dispose()
-  };
+  await publishSpeech(episodeId, role, text, eventId, prepared, false, sources);
+  const playback = await Promise.race([hook, sleep('5m').then(() => ({ timeout: true }))]);
+  hook.dispose();
+  return playback;
 }
 
 export async function episodeWorkflow(episodeId, launch = {}) {
   'use workflow';
   await runConversation(episodeId, {
     begin, snapshot, plan, prepareSpeech, publishSpeech, act, finish, emitInterruption, emitNotice, interjectionVerdict, expired, newEventId, summarize,
-    playbackWaiter, render: renderPodcastTimeline, failRender: failPodcastRender
+    publishSpeechAndWait, render: renderPodcastTimeline, failRender: failPodcastRender
   });
 }
