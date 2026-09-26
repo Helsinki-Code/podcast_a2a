@@ -31,7 +31,7 @@ function render() {
   const epCard = e => `<article class="card" data-episode="${e.id}" role="button" tabindex="0"><div class="card-top"><span class="tag ${esc(e.status)}">${esc(e.status)}</span><span class="card-arrow">↗</span></div><h3>${esc(e.outline.subject)}</h3><p>${esc(episodePerson(e,'host')?.name || 'Host')} with ${esc(episodePerson(e,'guest')?.name || 'Guest')} · ${shortDate(e.createdAt)}</p></article>`;
   $('#recentEpisodes').innerHTML = state.episodes.length ? state.episodes.slice(0, 3).map(epCard).join('') : '<div class="empty"><strong>No episodes yet</strong>Choose two personas and start your first recording.</div>';
   $('#recentPersonas').innerHTML = state.personas.length ? state.personas.slice(0, 6).map(p => `<div class="persona-chip">${avatar(p)}${esc(p.name)}</div>`).join('') : '<div class="empty">Your cast starts with a persona.</div>';
-  $('#personaGrid').innerHTML = state.personas.length ? state.personas.map(p => `<article class="persona-card">${avatar(p,true)}<h3>${esc(p.name)}</h3><p>${esc(p.systemPrompt)}</p><div class="persona-card-foot"><span>${p.knowledge?.length || 0} knowledge files · ${esc(p.voice)}</span><button data-edit="${p.id}">Edit →</button></div></article>`).join('') : '<div class="empty"><strong>No personas yet</strong>Create a host and a guest to begin.</div>';
+  $('#personaGrid').innerHTML = state.personas.length ? state.personas.map(p => `<article class="persona-card">${avatar(p,true)}<h3>${esc(p.name)}</h3><p>${esc(p.systemPrompt)}</p><div class="persona-card-foot"><span>${p.knowledge?.length || 0} knowledge files${p.knowledgeStats?.semantic ? ' · semantic search' : ''} · ${esc(p.voice)}</span><span class="card-buttons"><button data-chat="${p.id}">Test chat</button><button data-edit="${p.id}">Edit →</button></span></div></article>`).join('') : '<div class="empty"><strong>No personas yet</strong>Create a host and a guest to begin.</div>';
   $('#episodeList').innerHTML = state.episodes.length ? state.episodes.map(e => `<article class="episode-row" data-episode="${e.id}" role="button" tabindex="0"><div><div class="eyebrow">${shortDate(e.createdAt)}</div><h3>${esc(e.outline.subject)}</h3><p>${esc(episodePerson(e,'host')?.name || 'Host')} × ${esc(episodePerson(e,'guest')?.name || 'Guest')} · ${e.turns?.length || 0} spoken segments</p></div><div class="episode-row-right"><span class="tag ${esc(e.status)}">${esc(e.status)}</span>${e.video || e.mp4 ? `<a class="row-download" href="${esc(e.mp4 || e.video)}" download>Download video</a>` : ''}${['complete','stopped','failed','interrupted'].includes(e.status) ? `<button class="row-action" data-restart-episode="${esc(e.id)}">Restart · 20 credits</button>` : ''}${e.error || e.videoError ? errorMarkup(e.error || e.videoError) : ''}<span class="card-arrow">↗</span></div></article>`).join('') : '<div class="empty"><strong>Nothing recorded yet</strong>Create an episode to start the archive.</div>';
   $('#explainerList').innerHTML = state.explainers.length ? state.explainers.map(e => `<article class="episode-row explainer-row"><div><div class="eyebrow">${shortDate(e.createdAt)} · ${esc(new URL(e.url).hostname)}</div><h3>${esc(e.title)}</h3><p>${esc(e.summary || e.progress || e.brief)}</p>${e.chapters?.length ? `<ol class="chapter-list">${e.chapters.map(chapter => `<li><span>${formatClock(chapter.start)}</span> ${esc(chapter.title)}</li>`).join('')}</ol>` : ''}</div><div class="episode-row-right"><span class="tag ${esc(e.status)}">${esc(e.status.replace('_', ' '))}</span>${e.video ? `<a class="row-download" href="${esc(e.video)}" download>Download MP4</a><a class="row-download secondary" href="${esc(e.captions)}" download>Captions</a>` : ''}${e.status === 'awaiting_approval' ? `<button class="row-action primary" data-review-plan="${esc(e.id)}">Review scene plan</button>` : ''}${e.status === 'complete' && e.video ? `<button class="row-action primary" data-publish-explainer="${esc(e.id)}">Publish</button>` : ''}${e.status === 'complete' && e.scenes?.length ? `<button class="row-action" data-rerender-explainer="${esc(e.id)}">Edit &amp; re-render · 10 credits</button>` : ''}${e.status === 'draft' && e.authRequired ? `<button class="row-action" data-retry-explainer="${esc(e.id)}">Resume secure sign-in</button>` : ''}${['complete','failed'].includes(e.status) ? `<button class="row-action" data-restart-explainer="${esc(e.id)}">Restart · 30 credits</button>` : ''}${e.error ? errorMarkup(e.error) : ''}${e.rerenderError ? errorMarkup(e.rerenderError) : ''}</div></article>`).join('') : '<div class="empty"><strong>No explainers yet</strong>Give the agent a URL and the workflow your customer needs to understand.</div>';
   renderAccount();
@@ -64,9 +64,13 @@ function openPersona(existing = null) {
   populateSelect($('#speechProvider'), (state.config?.providers.speech || []).map(x => [x,x]), existing?.speechProvider || (state.config?.providers.ready.speech.openai ? 'openai' : 'gateway'));
   updateVoiceSuggestions(); $('#voiceSelect').value = existing?.voice || (state.config?.providers.voices?.[$('#speechProvider').value]?.[0] || '');
   if (existing) for (const key of ['name','systemPrompt','model','voiceStyle']) form.elements[key].value = existing[key] || '';
-  form._image = existing?.image || ''; form._knowledge = existing?.knowledge || [];
+  form._image = existing?.image || '';
+  const stats = new Map((existing?.knowledgeStats?.files || []).map(file => [file.name, file]));
+  form._knowledge = (existing?.knowledge || []).map(file => ({ name: file.name, keep: true, characters: file.characters, source: file.source, chunks: stats.get(file.name)?.chunks, embedded: stats.get(file.name)?.embedded }));
   $('#imagePreview').innerHTML = form._image ? `<img src="${esc(form._image)}" alt="Selected display image">` : 'No image selected';
-  $('#knowledgeList').textContent = form._knowledge.map(k => k.name).join(' · ') || 'No knowledge files';
+  $('#templateField').classList.toggle('hidden', Boolean(existing));
+  loadTemplates().catch(() => {});
+  renderKnowledgeList();
   $('#personaDialog').showModal();
 }
 function openEpisodeDialog() {
@@ -84,6 +88,44 @@ function openEpisodeDialog() {
   for (const id of ['#cohostSelect','#guest2Select','#guest3Select']) populateSelect($(id), [['', 'None'], ...state.personas.map(p => [p.id,p.name])], '');
   $('#maxInterruptionsValue').textContent = '4 per episode'; $('#musicVolumeValue').textContent = '8%';
   $('#episodeDialog').showModal();
+}
+function renderKnowledgeList() {
+  const form = $('#personaForm'), pending = [...form.elements.knowledgeFiles.files].map(file => ({ name: file.name, pendingFile: true, characters: file.size }));
+  const files = [...form._knowledge, ...pending];
+  $('#knowledgeList').innerHTML = files.length ? files.map((file, index) => `<li><span><strong>${esc(file.name)}</strong> <small>${file.pendingFile ? 'will be read on save' : `${Math.round((file.characters || file.text?.length || 0) / 1000)}k characters${file.chunks ? ` · ${file.chunks} passages${file.embedded ? ', searchable by meaning' : ''}` : file.keep ? '' : ' · new'}`}${file.source ? ` · <a href="${esc(file.source)}" target="_blank" rel="noopener">source</a>` : ''}</small></span>${file.pendingFile ? '' : `<button type="button" class="icon-button" data-remove-knowledge="${index}" aria-label="Remove ${esc(file.name)}">×</button>`}</li>`).join('') : '<li class="hint">No knowledge yet. Add files or web pages the persona should draw on.</li>';
+}
+async function loadTemplates() {
+  if (state.templates) return;
+  state.templates = await api('/api/persona-templates');
+  $('#personaTemplate').innerHTML = '<option value="">Blank persona</option>' + state.templates.map(template => `<option value="${esc(template.id)}">${esc(template.label)}</option>`).join('');
+}
+async function previewVoice() {
+  const form = $('#personaForm'), button = $('#previewVoice'); button.disabled = true; button.textContent = 'Generating…';
+  try {
+    const token = await state.clerk?.session?.getToken().catch(() => null);
+    const response = await fetch('/api/voices/preview', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ speechProvider: form.elements.speechProvider.value, voice: form.elements.voice.value, voiceStyle: form.elements.voiceStyle.value, name: form.elements.name.value }) });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'The voice preview failed.');
+    const audio = new Audio(URL.createObjectURL(await response.blob())); await audio.play();
+  } catch (error) { notice(error.message); } finally { button.disabled = false; button.textContent = '▶ Preview voice'; }
+}
+function openChat(persona) {
+  const form = $('#chatForm'); form.dataset.personaId = persona.id; form._history = []; form.reset();
+  $('#chatTitle').textContent = `Talk to ${persona.name}`; $('#chatLog').innerHTML = '';
+  $('#chatDialog').showModal(); form.elements.message.focus();
+}
+async function sendChat(event) {
+  event.preventDefault();
+  const form = event.currentTarget, message = form.elements.message.value.trim(), button = form.querySelector('[type=submit]');
+  if (!message) return;
+  const log = $('#chatLog'), name = person(form.dataset.personaId)?.name || 'Persona';
+  log.insertAdjacentHTML('beforeend', `<div class="chat-line you"><strong>You</strong><p>${esc(message)}</p></div>`);
+  form.elements.message.value = ''; button.disabled = true;
+  try {
+    const result = await api(`/api/personas/${form.dataset.personaId}/chat`, { method: 'POST', body: JSON.stringify({ message, history: form._history }) });
+    form._history.push({ role: 'tester', text: message }, { role: 'persona', text: result.reply });
+    log.insertAdjacentHTML('beforeend', `<div class="chat-line persona"><strong>${esc(name)}</strong><p>${esc(result.reply)}</p>${result.sources.length ? `<small class="sources">Sources: ${result.sources.map(esc).join(', ')}</small>` : result.retrieved.length ? '<small class="sources">No knowledge file was cited.</small>' : ''}</div>`);
+  } catch (error) { log.insertAdjacentHTML('beforeend', `<div class="chat-line error">${esc(error.message)}</div>`); }
+  finally { button.disabled = false; log.scrollTop = log.scrollHeight; form.elements.message.focus(); }
 }
 function updateVoiceSuggestions() { const voices = state.config?.providers.voices?.[$('#speechProvider').value] || []; $('#voiceSuggestions').innerHTML = voices.map(voice => `<option value="${esc(voice)}"></option>`).join(''); }
 async function uploadFile(file, kind) {
@@ -110,7 +152,7 @@ async function savePersona(event) {
       if (imageFile.size > 3_000_000) throw new Error('Display images must be under 3 MB.');
       image = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(imageFile); });
     }
-    const knowledge = [...form._knowledge];
+    const knowledge = form._knowledge.map(file => file.keep ? { name: file.name, keep: true } : { name: file.name, text: file.text, source: file.source });
     for (const file of form.elements.knowledgeFiles.files) {
       if (file.size > 5_000_000) throw new Error(`${file.name} exceeds the 5 MB file limit.`);
       knowledge.push({ name: file.name, text: await extractFile(file) });
@@ -684,7 +726,26 @@ $('#explainerDesktopReady').addEventListener('click',async()=>{const form=$('#ex
 $('#explainerForm').elements.authRequired.addEventListener('change',event=>{$('#explainerCredentials').classList.toggle('hidden',!event.target.checked);for(const name of ['username','password'])$('#explainerForm').elements[name].required=event.target.checked});
 for (const name of ['captionsEnabled','captionStyle','captionPosition','captionFont','captionSize','captionTextColor','captionBackgroundColor','captionWords']) $('#explainerForm').elements[name].addEventListener('input',updateSubtitlePreview);
 $('#personaForm').elements.imageFile.addEventListener('change',event=>{const file=event.target.files[0];if(file)$('#imagePreview').innerHTML=`<img src="${URL.createObjectURL(file)}" alt="Image preview">`});
-$('#personaForm').elements.knowledgeFiles.addEventListener('change',event=>{$('#knowledgeList').textContent=[...$('#personaForm')._knowledge.map(k=>k.name),...[...event.target.files].map(f=>f.name)].join(' · ')});
+$('#personaForm').elements.knowledgeFiles.addEventListener('change', renderKnowledgeList);
+$('#previewVoice').addEventListener('click', previewVoice);
+$('#chatForm').addEventListener('submit', sendChat);
+$('#personaTemplate').addEventListener('change', event => {
+  const template = state.templates?.find(entry => entry.id === event.target.value), form = $('#personaForm');
+  if (!template) return;
+  for (const key of ['name','systemPrompt','voiceStyle']) form.elements[key].value = template[key];
+  form.elements.voice.value = template.voice;
+});
+$('#addKnowledgeUrl').addEventListener('click', async () => {
+  const form = $('#personaForm'), button = $('#addKnowledgeUrl'), target = form.elements.knowledgeUrl.value.trim();
+  if (!target) return notice('Paste a public web page address first.');
+  button.disabled = true; button.textContent = 'Reading…';
+  try { const page = await api('/api/extract-url', { method: 'POST', body: JSON.stringify({ url: target }) }); form._knowledge.push(page); form.elements.knowledgeUrl.value = ''; renderKnowledgeList(); notice(`Added “${page.name}”. Save the persona to index it.`, true); }
+  catch (error) { notice(error.message); } finally { button.disabled = false; button.textContent = 'Add page'; }
+});
+document.addEventListener('click', event => {
+  const remove = event.target.closest('[data-remove-knowledge]'); if (remove) { $('#personaForm')._knowledge.splice(Number(remove.dataset.removeKnowledge), 1); renderKnowledgeList(); }
+  const chat = event.target.closest('button[data-chat]'); if (chat) openChat(person(chat.dataset.chat));
+});
 $('#speechProvider').addEventListener('change',()=>{updateVoiceSuggestions();$('#voiceSelect').value=state.config?.providers.voices?.[$('#speechProvider').value]?.[0]||''});
 $('#episodeForm').elements.interjectProbability.addEventListener('input',event=>{$('#interjectValue').textContent=`${event.target.value}%`});
 $('#episodeForm').elements.maxInterruptions.addEventListener('input',event=>{$('#maxInterruptionsValue').textContent=`${event.target.value} per episode`});

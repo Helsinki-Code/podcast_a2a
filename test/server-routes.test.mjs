@@ -106,3 +106,30 @@ test('exports download timed transcripts and the public feed serves only include
   assert.equal((await call('GET', `/feeds/${token}.xml`, { user: null })).status, 404, 'rotating the token retires the old URL');
   assert.equal((await call('POST', '/api/integrations/youtube/connect')).status, 409);
 });
+
+test('persona knowledge is kept by name, stats replace raw text, and test chat cites real files', async () => {
+  const providers = await import('../lib/providers.mjs');
+  let seenSystem = '';
+  providers.registerModel('persona-test', { ready: () => true, async generate(messages) { seenSystem = messages[0].content; return { reply: 'Our onboarding guide says setup takes a day.', sources: ['guide.txt', 'invented.txt'] }; } });
+  providers.registerSpeech('preview-test', { ready: () => true, voices: ['v1'], async synthesize(text) { return Buffer.from(`mp3:${text}`); } });
+  const created = await call('POST', '/api/personas', { body: { name: 'Ana', systemPrompt: 'Explain onboarding.', modelProvider: 'persona-test', knowledge: [{ name: 'guide.txt', text: 'Onboarding setup takes one day with the import wizard. '.repeat(40) }, { name: 'faq.txt', text: 'Pricing is per seat.' }] } });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.knowledgeIndex, undefined, 'embedding index is never sent to the browser');
+  assert.deepEqual(created.data.knowledge.map(file => file.name), ['guide.txt', 'faq.txt']);
+  assert.equal(created.data.knowledge[0].text, undefined);
+  assert.ok(created.data.knowledgeStats.chunks >= 2);
+  const updated = await call('PUT', `/api/personas/${created.data.id}`, { body: { name: 'Ana', systemPrompt: 'Explain onboarding.', modelProvider: 'persona-test', knowledge: [{ name: 'guide.txt', keep: true }, { name: 'web.txt', text: 'Fresh page text about integrations.', source: 'https://example.com/p' }] } });
+  assert.equal(updated.status, 200);
+  assert.deepEqual(updated.data.knowledge.map(file => [file.name, file.characters > 0, file.source]), [['guide.txt', true, ''], ['web.txt', true, 'https://example.com/p']]);
+  const stored = await store.persona(created.data.id);
+  assert.match(stored.knowledge[0].text, /import wizard/, 'kept files retain their server-side text');
+  const chat = await call('POST', `/api/personas/${created.data.id}/chat`, { body: { message: 'How long does onboarding setup take?' } });
+  assert.equal(chat.status, 200);
+  assert.deepEqual(chat.data.sources, ['guide.txt']);
+  assert.match(seenSystem, /import wizard/);
+  const preview = await fetch(`${base}/api/voices/preview`, { method: 'POST', headers: { Authorization: 'Bearer paid', 'Content-Type': 'application/json' }, body: JSON.stringify({ speechProvider: 'preview-test', voice: 'v1', name: 'Ana' }) });
+  assert.equal(preview.headers.get('content-type'), 'audio/mpeg');
+  assert.match(await preview.text(), /mp3:Hi, I'm Ana/);
+  const templates = await call('GET', '/api/persona-templates');
+  assert.ok(templates.data.length >= 5 && templates.data.every(template => template.systemPrompt && template.voice));
+});
