@@ -14,10 +14,12 @@ const { runEpisode } = await import('../lib/engine.mjs');
 const { retrieve, buildIndex } = await import('../lib/rag.mjs');
 const { startSpeech, openLiveAudio } = await import('../lib/audio.mjs');
 const { demoLeadInComplete, ownContext, speechBlocks, speechPhrases } = await import('../lib/conversation.mjs');
-const { buildCaptions, captionChunks, explainerCaptionFilter, explainerSceneBudget, requiredActionKinds, actionFingerprint, actionIsCompatible, buildExplainerDirectorState } = await import('../workflows/explainer-steps.mjs');
+const { buildCaptions, captionChunks, explainerCaptionFilter, explainerSceneBudget, requiredActionKinds, actionFingerprint, actionIsCompatible, resolveActionTarget, buildExplainerDirectorState } = await import('../workflows/explainer-steps.mjs');
+const { parseModelJson } = await import('../lib/model-json.mjs');
 const { isSandboxNameConflict } = await import('../lib/vercel-sandbox.mjs');
 const { parseProbeJson, parseSilenceLog, evaluateMediaQuality } = await import('../lib/media-quality.mjs');
-const { podcastTimeline, podcastCaptions } = await import('../lib/podcast-timeline.mjs');
+const { podcastTimeline, podcastCaptions, podcastCaptionFilter } = await import('../lib/podcast-timeline.mjs');
+const { timedSubtitleCues, cueAt } = await import('../public/captions.js');
 const { environmentReport } = await import('../lib/environment.mjs');
 const { episodePlanHasContent, episodePlanQualityIssue } = await import('../lib/episode-plan.mjs');
 const { assertPublicHttpUrl, isPrivateAddress } = await import('../lib/url-security.mjs');
@@ -105,6 +107,24 @@ test('explainer action history has stable fingerprints that prevent repeated sce
   assert.equal(actionIsCompatible({ type: 'click', x: 500, y: 400 }, consequential), false);
 });
 
+test('explainer maps CSS and text selectors from the director onto snapshot refs', () => {
+  const screen = { content: 'Newsletter\n- heading "Subscribe to our newsletter" [level=2, ref=e2]\n- textbox "Email" [ref=e3]\n- button "Subscribe" [ref=e4]\n- button "No thanks" [ref=e5]' };
+  for (const selector of ["button[aria-label='No thanks']", 'text="No thanks"', "button:has-text('No thanks')", 'No thanks', 'e5']) {
+    const action = resolveActionTarget({ type: 'click', selector }, screen);
+    assert.equal(action.selector, '@e5');
+    assert.equal(actionIsCompatible(action, screen), true);
+  }
+  assert.equal(resolveActionTarget({ type: 'type', selector: "input[placeholder='Email']", value: 'demo@example.com' }, screen).selector, '@e3');
+  assert.equal(resolveActionTarget({ type: 'click', selector: '#missing' }, screen).selector, '#missing');
+});
+
+test('model JSON salvage recovers fenced or wrapped plans and rejects non-objects', () => {
+  assert.deepEqual(parseModelJson('Here you go:\n```json\n{"segments":[{"type":"speak","text":"A {braced} line"}],"finish":false,}\n```'), { segments: [{ type: 'speak', text: 'A {braced} line' }], finish: false });
+  assert.deepEqual(parseModelJson('{"interrupt":false,"reason":"none"} trailing words'), { interrupt: false, reason: 'none' });
+  assert.equal(parseModelJson('{"segments": [{"type": "speak", "text": "cut off'), null);
+  assert.equal(parseModelJson('[1,2]'), null);
+});
+
 test('explainer scene budget follows the requested brief instead of a fixed scene count', async () => {
   const short = { id: store.uid(), ownerId: 'owner', createdAt: store.stamp(), status: 'draft', url: 'https://example.com', title: 'Short', brief: 'Show the dashboard and explain the visible summary cards.' };
   const detailed = { ...short, id: store.uid(), title: 'Detailed', brief: '- Open the dashboard\n- Review the pipeline\n- Open one account\n- Explain its activity\n- Return to the dashboard\n- Show reports' };
@@ -170,6 +190,26 @@ test('podcast timeline excludes generation waits and includes browser action med
   assert.match(captions, /HOST: Welcome to the show/);
   assert.match(captions, /GUEST: I will show the product/);
   assert.doesNotMatch(captions, /00:01:02/);
+});
+
+test('podcast subtitles advance phrase by phrase with the spoken audio', () => {
+  const text = 'Great question. The dashboard groups every campaign by stage, so you can see which accounts need attention first and act on them today.';
+  const cues = timedSubtitleCues(text, 9);
+  assert.ok(cues.length >= 3);
+  assert.equal(cues[0].text, 'Great question.');
+  assert.equal(cues[0].start, 0);
+  assert.equal(cues.at(-1).end, 9);
+  for (let index = 1; index < cues.length; index++) assert.equal(cues[index].start, cues[index - 1].end);
+  assert.ok(cues.every(cue => cue.text.split(' ').length <= 7));
+  assert.equal(cues.map(cue => cue.text).join(' '), text);
+  assert.equal(cueAt(cues, 0).text, 'Great question.');
+  assert.equal(cueAt(cues, 8.99).text, cues.at(-1).text);
+  const srt = podcastCaptions([{ type: 'speech', role: 'guest', text, start: 10, audioDuration: 9 }], { labelColors: { guest: '#efbe9e' } });
+  assert.match(srt, /^1\n00:00:10,000 --> /);
+  assert.match(srt, /<font color="#efbe9e">GUEST<\/font> {2}Great question\./);
+  assert.equal((srt.match(/GUEST/g) || []).length, 1);
+  assert.match(srt, /--> 00:00:19,000\n/);
+  assert.match(podcastCaptionFilter('bold'), /^subtitles=\/tmp\/podcast-burn\.srt:force_style='.*Alignment=2/);
 });
 
 test('environment report names missing configuration without exposing values or requiring E2B', () => {

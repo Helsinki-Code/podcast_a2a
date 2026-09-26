@@ -9,7 +9,8 @@ export default withWorkflow({
       { source: '/terms', destination: '/terms.html' },
       { source: '/health', destination: '/api/health' },
       { source: '/public/:path*', destination: '/:path*' },
-      { source: '/assets/:path*', destination: '/api/_assets/:path*' }
+      { source: '/assets/:path*', destination: '/api/_assets/:path*' },
+      { source: '/feeds/:path*', destination: '/api/feeds/:path*' }
     ];
   }
 });
