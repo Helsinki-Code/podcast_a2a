@@ -1,4 +1,5 @@
-import { listEpisodes, podcastFeedByToken, saveIntegration, readAssetBytes } from '../lib/store.mjs';
+import { listEpisodes, listExplainers, podcastFeedByToken, saveIntegration, readAssetBytes, workspacesWithRetention, deleteEpisode, deleteExplainer } from '../lib/store.mjs';
+import { json } from '../lib/http.mjs';
 import { podcastFeedXml } from '../lib/publishing.mjs';
 import { encryptJson, verifyState } from '../lib/secure.mjs';
 import { exchangeYoutubeCode, youtubeChannel } from '../lib/youtube.mjs';
@@ -37,6 +38,18 @@ export async function handle({ req, res, url, parts }) {
       return true;
     }
     return error(res, 404, 'Not found');
+  }
+  // Daily retention sweep (Vercel Cron sends Authorization: Bearer $CRON_SECRET).
+  if (url.pathname === '/api/cron/retention' && req.method === 'GET') {
+    if (!process.env.CRON_SECRET || req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) return error(res, 401, 'Unauthorized');
+    let deleted = 0;
+    for (const workspace of await workspacesWithRetention()) {
+      const cutoff = new Date(Date.now() - workspace.retentionDays * 86400000).toISOString();
+      const old = item => String(item.createdAt || '') < cutoff;
+      for (const item of await listEpisodes(workspace.ownerId)) if (old(item) && !item.inFeed && !['running', 'preparing'].includes(item.status)) { await deleteEpisode(item.id); deleted++; }
+      for (const item of await listExplainers(workspace.ownerId)) if (old(item) && !['queued', 'running', 'planning', 'rendering'].includes(item.status)) { await deleteExplainer(item.id); deleted++; }
+    }
+    return json(res, 200, { deleted });
   }
   if (url.pathname === '/api/integrations/youtube/callback' && req.method === 'GET') {
     const state = verifyState(url.searchParams.get('state'));

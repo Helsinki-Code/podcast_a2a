@@ -1,3 +1,5 @@
+import { captureError } from '../lib/monitor.mjs';
+import { enterUsage } from '../lib/usage.mjs';
 import { episode, explainer, setEpisodeFields, setExplainerFields, putNamedAsset, readAssetBytes, refundCredits, stamp } from '../lib/store.mjs';
 import { modelProviders, speechProviders, supportedVoice } from '../lib/providers.mjs';
 import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';
@@ -5,6 +7,7 @@ import { shortsPrompt, validateShortRanges, heuristicShorts, verticalFilter, sho
 import { toSrt, toVtt } from '../lib/publishing.mjs';
 import { podcastTimeline } from '../lib/podcast-timeline.mjs';
 import { DEFAULT_VOICES } from '../lib/cast.mjs';
+import { modelFor } from '../lib/models.mjs';
 import { assemblePodcast } from './podcast-render-steps.mjs';
 import { revoiceScenes, mixExplainer } from './explainer-steps.mjs';
 
@@ -19,13 +22,14 @@ const titleOf = (kind, item) => kind === 'podcast' ? item.outline?.subject : ite
 export async function renderShorts(kind, id) {
   'use step';
   const item = await load(kind)(id);
+  enterUsage({ ownerId: item?.ownerId, kind, id });
   const timeline = item?.timeline || [];
   if (!item?.mp4 && !item?.video) throw new Error('Render the video before making shorts.');
   if (!timeline.length) throw new Error('This video has no timed transcript to cut shorts from.');
   let clips = [];
   const provider = modelProviders.get('gateway');
   if (provider?.ready?.()) {
-    try { clips = validateShortRanges(timeline, (await provider.generate(shortsPrompt(timeline, titleOf(kind, item)), process.env.AI_GATEWAY_MODEL, { user: item.ownerId, tags: ['feature:shorts'] }))?.clips || []); } catch {}
+    try { clips = validateShortRanges(timeline, (await provider.generate(shortsPrompt(timeline, titleOf(kind, item)), modelFor('metadata'), { user: item.ownerId, tags: ['feature:shorts'] }))?.clips || []); } catch {}
   }
   if (!clips.length) clips = heuristicShorts(timeline);
   if (!clips.length) throw new Error('No 15–58 second highlight could be found in this video.');
@@ -62,7 +66,7 @@ async function translateTimeline(item, timeline, language) {
     const result = await provider.generate([
       { role: 'system', content: `Translate spoken video lines into ${LANGUAGES[language]}. Return JSON {"lines":[string]} with exactly ${batch.length} entries in the same order. Keep names, product names, and UI labels as they appear on screen. Keep each line about as long as the original so it fits the same timing. Natural spoken register.` },
       { role: 'user', content: JSON.stringify(batch.map(part => part.text)) }
-    ], process.env.AI_GATEWAY_MODEL, { user: item.ownerId, tags: ['feature:translate'] });
+    ], modelFor('metadata'), { user: item.ownerId, tags: ['feature:translate'] });
     const lines = Array.isArray(result?.lines) ? result.lines : [];
     if (lines.length !== batch.length) throw new Error('The translation did not return one line per caption. Try again.');
     batch.forEach((part, index) => translated.push({ ...part, text: String(lines[index] || part.text).trim() }));
@@ -79,6 +83,7 @@ async function translateAndStore(kind, id, language) {
   if (!LANGUAGES[language]) throw new Error('Unsupported language.');
   const item = await load(kind)(id);
   if (!item?.timeline?.length) throw new Error('This video has no timed transcript to translate.');
+  enterUsage({ ownerId: item.ownerId, kind, id });
   const timeline = await translateTimeline(item, item.timeline, language);
   const stem = `${kind}-${safe(id)}-${language}`;
   const [captions, vtt] = await Promise.all([putNamedAsset(`${stem}.srt`, toSrt(timeline)), putNamedAsset(`${stem}.vtt`, toVtt(timeline))]);
@@ -93,6 +98,7 @@ export async function dubMedia(kind, id, language) {
   'use step';
   if (!LANGUAGES[language]) throw new Error('Unsupported language.');
   let item = await load(kind)(id);
+  enterUsage({ ownerId: item?.ownerId, kind, id });
   if (!item?.translations?.[language]?.timeline) {
     await translateAndStore(kind, id, language);
     item = await load(kind)(id);
@@ -137,6 +143,7 @@ export async function dubMedia(kind, id, language) {
 // Marks a follow-up job failed and refunds its reservation, leaving the main video untouched.
 export async function failPublishJob(kind, id, job, message, language = '') {
   'use step';
+  await captureError(new Error(message || 'Publishing job failed.'), { kind, id, stage: job, language });
   const item = await load(kind)(id);
   if (!item) return;
   const reason = String(message || 'The job failed.').slice(0, 1200);
@@ -173,5 +180,6 @@ export async function uploadYoutube(kind, id, options = {}) {
 
 export async function failYoutubeUpload(kind, id, message) {
   'use step';
+  await captureError(new Error(message || 'YouTube upload failed.'), { kind, id, stage: 'youtube' });
   await update(kind)(id, { youtubeUpload: { status: 'failed', error: String(message || 'Upload failed.').slice(0, 600), failedAt: stamp() } });
 }

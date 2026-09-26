@@ -1,4 +1,4 @@
-import { listEpisodes, persona, episode, episodeEventsAfter, addEpisode, save, setEpisodeFields, acknowledgeEpisodeSpeech, assets, usesRemoteAssets, uid, stamp, reserveCredits, copyEpisodeForRestart } from '../lib/store.mjs';
+import { listEpisodes, persona, episode, episodeEventsAfter, addEpisode, save, setEpisodeFields, acknowledgeEpisodeSpeech, assets, usesRemoteAssets, uid, stamp, reserveCredits, copyEpisodeForRestart, deleteEpisode } from '../lib/store.mjs';
 import path from 'node:path';
 import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -11,6 +11,12 @@ import { json, error, body } from '../lib/http.mjs';
 import { listeners, acknowledgements, transcode, launchEpisode } from './live.mjs';
 
 export async function handle({ req, res, url, parts, auth, userAccount }) {
+  if (parts[0] === 'api' && parts[1] === 'episodes' && parts[2] && parts.length === 3 && req.method === 'DELETE') {
+    const item = await episode(parts[2]);
+    if (!item || item.ownerId !== auth.userId) return error(res, 404, 'Not found');
+    if (['running','preparing'].includes(item.status) || item.videoStatus === 'processing') return error(res, 409, 'Stop it or wait for it to finish before deleting it.');
+    return json(res, 200, { ok: true, filesRemoved: await deleteEpisode(item.id) });
+  }
   if (url.pathname === '/api/episodes' && req.method === 'GET') return json(res, 200, (await listEpisodes(auth.userId)).map(({ events, ...rest }) => rest));
   if (url.pathname === '/api/episodes' && req.method === 'POST') {
     const input = await body(req);

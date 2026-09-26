@@ -2,11 +2,13 @@ import './lib/env.mjs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { initStore, account, usesRemoteAssets } from './lib/store.mjs';
+import { initStore, account, usesRemoteAssets, membershipFor } from './lib/store.mjs';
 import { authenticate } from './lib/auth.mjs';
 import { costs, isPaid, processStripeWebhook, publicPlans } from './lib/billing.mjs';
 import { availableProviders } from './lib/providers.mjs';
 import { environmentReport } from './lib/environment.mjs';
+import { captureError } from './lib/monitor.mjs';
+import { checkRateLimit } from './lib/rate-limit.mjs';
 import { json, error, rawBody, staticFile } from './lib/http.mjs';
 import * as accountRoutes from './routes/account.mjs';
 import * as assetRoutes from './routes/assets.mjs';
@@ -15,6 +17,7 @@ import * as episodeRoutes from './routes/episodes.mjs';
 import * as explainerRoutes from './routes/explainers.mjs';
 import * as publishingRoutes from './routes/publishing.mjs';
 import * as publicRoutes from './routes/public.mjs';
+import * as teamRoutes from './routes/team.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let initialization;
@@ -49,18 +52,34 @@ export async function handler(req, res) {
       return json(res, 200, await processStripeWebhook(raw, req.headers['stripe-signature'] || ''));
     }
     if (await publicRoutes.handle({ req, res, url, parts })) return;
-    const auth = await authenticate(req);
-    if (!auth) return error(res, 401, 'Sign in to The Sales Forge.');
+    const session = await authenticate(req);
+    if (!session) return error(res, 401, 'Sign in to The Sales Forge.');
+    // Team members act inside the owner's workspace: auth.userId is that scope, actorId the person.
+    const membership = await membershipFor(session.userId);
+    const auth = { ...session, actorId: session.userId, userId: membership?.ownerId || session.userId, role: membership?.role || 'owner', teamName: membership?.teamName || '' };
+    const limited = await checkRateLimit(auth.actorId, req.method, url.pathname);
+    if (limited) {
+      res.setHeader('Retry-After', String(limited.retryAfter));
+      return json(res, 429, { error: `Too many requests (${limited.rule}). Try again in ${Math.ceil(limited.retryAfter / 60)} minutes.` });
+    }
     const userAccount = await account(auth.userId);
     const context = { req, res, url, parts, auth, userAccount };
+    if (await teamRoutes.handle(context)) return;
+    if (auth.role === 'viewer' && !['GET', 'HEAD'].includes(req.method) && !url.pathname.startsWith('/api/team/')) return error(res, 403, 'Viewers can watch and download but not create or change anything. Ask an admin for editor access.');
+    if (auth.role !== 'owner' && /^\/api\/billing\//.test(url.pathname)) return error(res, 403, 'Only the workspace owner manages billing.');
     if (await accountRoutes.handleUnpaid(context)) return;
     if (!isPaid(userAccount)) return error(res, 402, 'A paid The Sales Forge subscription is required.');
     for (const routes of paidRoutes) if (await routes.handle(context)) return;
     error(res, 404, 'Not found');
-  } catch (cause) { error(res, 400, cause.message || 'Request failed'); }
+  } catch (cause) {
+    // Validation errors are expected; programming errors (TypeError etc.) are reported.
+    if (cause instanceof TypeError || cause instanceof ReferenceError || cause instanceof RangeError || cause instanceof SyntaxError && !/JSON/.test(cause.message)) captureError(cause, { route: `${req.method} ${req.url?.split('?')[0]}` });
+    error(res, 400, cause.message || 'Request failed');
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 3377);
+  process.on('unhandledRejection', reason => captureError(reason instanceof Error ? reason : new Error(String(reason)), { source: 'unhandledRejection' }));
   http.createServer(handler).listen(port, process.env.HOST || '127.0.0.1', () => console.log(`The Sales Forge: http://${process.env.HOST || '127.0.0.1'}:${port}`));
 }

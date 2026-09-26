@@ -1,8 +1,11 @@
+import { captureError } from '../lib/monitor.mjs';
+import { enterUsage } from '../lib/usage.mjs';
 import { episodeState, appendEpisodeEvent, setEpisodeFields, stamp, uid, putNamedAsset, refundCredits } from '../lib/store.mjs';
 import { modelProviders, speechProviders, supportedVoice } from '../lib/providers.mjs';
 import { ownContext, transcriptForPrompt } from '../lib/conversation.mjs';
 import { retrieveHybrid } from '../lib/rag.mjs';
 import { DEFAULT_VOICES, isGuestRole } from '../lib/cast.mjs';
+import { modelFor } from '../lib/models.mjs';
 import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';
 import { episodePlanHasContent, episodePlanQualityIssue } from '../lib/episode-plan.mjs';
 
@@ -31,6 +34,7 @@ export async function expired(episodeId) {
 export async function plan(episodeId, role, screen, mode, extra = '') {
   'use step';
   const item = await episodeState(episodeId);
+  enterUsage({ ownerId: item?.ownerId, kind: 'podcast', id: episodeId });
   const agent = item.personas[role];
   const providerName = agent.modelProvider || 'gateway';
   const provider = modelProviders.get(providerName);
@@ -39,12 +43,12 @@ export async function plan(episodeId, role, screen, mode, extra = '') {
   const query = `${item.outline.subject} ${item.turns.slice(-4).map(turn => turn.text).join(' ')}`;
   const notes = await retrieveHybrid(agent.knowledgeIndex || [], query).catch(() => undefined);
   const messages = ownContext(item, role, agent, screen, mode, extra, { notes });
-  const selectedModel = agent.model || (providerName === 'gateway' ? (isGuestRole(role) ? process.env.AI_GATEWAY_GUEST_MODEL : process.env.AI_GATEWAY_HOST_MODEL) || process.env.AI_GATEWAY_MODEL : undefined);
+  const selectedModel = agent.model || (providerName === 'gateway' ? modelFor(isGuestRole(role) ? 'guest' : 'host') : undefined);
   const routing = { user: item.ownerId, tags: [`feature:podcast-${role}`, `mode:${mode}`] };
   let result;
   if (process.env.COMPUTER_USE_SNAPSHOT_ID && mode === 'turn' && screen?.type === 'browser' && provider.generateVisual) {
     const capture = await new VercelEpisodeSandbox(episodeId, () => {}, screen, role).captureForModel(item.settings?.demo?.url || '');
-    const visualModel = process.env.AI_GATEWAY_GUEST_COMPUTER_MODEL || process.env.AI_GATEWAY_COMPUTER_MODEL || selectedModel;
+    const visualModel = modelFor('guestComputer');
     result = await provider.generateVisual(messages, capture.image, visualModel, { ...routing, output: 'podcast' });
   } else result = await provider.generate(messages, selectedModel, routing);
   if (!episodePlanHasContent(result, mode)) throw new Error(`${role} model returned no ${mode === 'interrupt' ? 'interruption verdict' : 'speech or action'}.`);
@@ -59,18 +63,20 @@ export async function plan(episodeId, role, screen, mode, extra = '') {
 export async function interjectionVerdict(episodeId, otherRole, currentRole, phrase, screen, trigger = '') {
   'use step';
   const item = await episodeState(episodeId);
+  enterUsage({ ownerId: item?.ownerId, kind: 'podcast', id: episodeId });
   if (Math.random() < (Number(item.settings.interjectProbability) || 0)) return { interrupt: true, reason: 'spontaneous interjection' };
   if (!trigger) return { interrupt: false };
   const agent = item.personas[otherRole];
   const providerName = agent.modelProvider || 'gateway';
   const provider = modelProviders.get(providerName);
-  const routerModel = agent.model || (providerName === 'gateway' ? process.env.AI_GATEWAY_ROUTER_MODEL || 'google/gemini-2.5-flash-lite' : undefined);
+  const routerModel = agent.model || (providerName === 'gateway' ? modelFor('router') : undefined);
   return provider.generate(ownContext(item, otherRole, agent, screen, 'interrupt', `The ${currentRole} is still speaking and just said (${trigger}): ${phrase}`), routerModel, { user: item.ownerId, tags: ['feature:podcast-interjection'] });
 }
 // Condenses everything before `throughTurn` into a running summary for long episodes.
 export async function summarize(episodeId, throughTurn) {
   'use step';
   const item = await episodeState(episodeId);
+  enterUsage({ ownerId: item?.ownerId, kind: 'podcast', id: episodeId });
   const upTo = Math.max(0, Math.min(item.turns.length, Number(throughTurn) || 0));
   if (upTo <= (Number(item.memory?.throughTurn) || 0)) return item.memory || null;
   const provider = modelProviders.get('gateway');
@@ -79,7 +85,7 @@ export async function summarize(episodeId, throughTurn) {
   const result = await provider.generate([
     { role: 'system', content: 'You keep running notes for a live podcast. Return JSON {"summary":string}. Summarize the conversation so far in at most 180 words: the main questions asked, each speaker\'s key claims and examples, any demo shown, and open threads. Name speakers. No commentary.' },
     { role: 'user', content: earlier }
-  ], process.env.AI_GATEWAY_ROUTER_MODEL || process.env.AI_GATEWAY_MODEL, { user: item.ownerId, tags: ['feature:podcast-memory'] });
+  ], modelFor('router'), { user: item.ownerId, tags: ['feature:podcast-memory'] });
   const summary = String(result?.summary || '').trim().slice(0, 2500);
   if (!summary) return item.memory || null;
   const memory = { summary, throughTurn: upTo, updatedAt: stamp() };
@@ -89,6 +95,7 @@ export async function summarize(episodeId, throughTurn) {
 export async function prepareSpeech(episodeId, role, text) {
   'use step';
   const item = await episodeState(episodeId);
+  enterUsage({ ownerId: item?.ownerId, kind: 'podcast', id: episodeId });
   const agent = item.personas[role];
   const providerName = agent.speechProvider || 'gateway';
   const provider = speechProviders.get(providerName);
@@ -131,6 +138,7 @@ export async function act(episodeId, role, name, input, screen) {
 }
 export async function finish(episodeId, status, error = null) {
   'use step';
+  if (status === 'failed') await captureError(new Error(error || 'Episode failed.'), { kind: 'podcast', id: episodeId, stage: 'conversation' });
   const item = await episodeState(episodeId);
   if (status === 'failed' && item?.creditsCharged && item.ownerId) await refundCredits(item.ownerId, item.creditsCharged, 'podcast', item.creditReference || episodeId);
   const fields = { status, endedAt: stamp() };

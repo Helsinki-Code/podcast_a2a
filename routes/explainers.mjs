@@ -1,10 +1,16 @@
-import { listExplainers, explainer, saveExplainer, setExplainerFields, stamp, uid, reserveCredits, copyExplainerForRestart, brandKit } from '../lib/store.mjs';
+import { listExplainers, explainer, saveExplainer, setExplainerFields, stamp, uid, reserveCredits, copyExplainerForRestart, brandKit, deleteExplainer } from '../lib/store.mjs';
 import { costs } from '../lib/billing.mjs';
 import { supportedVoice } from '../lib/providers.mjs';
 import { assertPublicHttpUrl } from '../lib/url-security.mjs';
 import { json, error, body } from '../lib/http.mjs';
 
 export async function handle({ req, res, url, parts, auth, userAccount }) {
+  if (parts[0] === 'api' && parts[1] === 'explainers' && parts[2] && parts.length === 3 && req.method === 'DELETE') {
+    const item = await explainer(parts[2]);
+    if (!item || item.ownerId !== auth.userId) return error(res, 404, 'Not found');
+    if (['queued','running','planning','rendering'].includes(item.status) || item.videoStatus === 'processing') return error(res, 409, 'Stop it or wait for it to finish before deleting it.');
+    return json(res, 200, { ok: true, filesRemoved: await deleteExplainer(item.id) });
+  }
   if (url.pathname === '/api/explainers' && req.method === 'GET') return json(res, 200, await listExplainers(auth.userId));
   if (url.pathname === '/api/explainers' && req.method === 'POST') {
     const input = await body(req, 20_000);

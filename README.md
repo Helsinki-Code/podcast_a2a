@@ -59,6 +59,29 @@ AI_GATEWAY_FALLBACK_MODELS=google/gemini-3.1-flash-lite
 AI_GATEWAY_VISION_FALLBACK_MODELS=google/gemini-3.1-flash-lite
 ```
 
+Optional features turn on when their variables are set:
+
+```dotenv
+# Voices and models (all model choices live in lib/models.mjs; each has its own override)
+ELEVENLABS_API_KEY=            # ElevenLabs voices (any voice ID from your library)
+AI_GATEWAY_TTS_MODEL=openai/tts-1          # use openai/gpt-4o-mini-tts for delivery-style instructions
+AI_GATEWAY_EMBEDDING_MODEL=openai/text-embedding-3-small
+AI_GATEWAY_METADATA_MODEL=     # titles, chapters, shorts selection, translation
+MODEL_PRICES_JSON=             # override per-model prices used for run-cost estimates
+
+# Publishing
+YOUTUBE_CLIENT_ID=             # Google OAuth client (YouTube Data API v3 enabled)
+YOUTUBE_CLIENT_SECRET=         # redirect URI: <app>/api/integrations/youtube/callback
+INTEGRATIONS_SECRET=           # 32+ characters; encrypts connected-account tokens and signs OAuth state
+
+# Operations
+RESEND_API_KEY=                # team invitations and "your video is ready" emails
+EMAIL_FROM=                    # e.g. The Sales Forge <studio@dsalesforge.online>
+SENTRY_DSN=                    # error reporting (pipeline failures and server bugs)
+CRON_SECRET=                   # protects the daily retention sweep (/api/cron/retention)
+RATE_LIMITS_JSON=              # e.g. {"jobs":40,"ai-tools":60} per user per hour
+```
+
 Vercel supplies OIDC for AI Gateway and Sandbox in deployed environments. Local development can use `AI_GATEWAY_API_KEY`; direct OpenAI speech can use `OPENAI_API_KEY`.
 
 ## Local development
@@ -79,10 +102,19 @@ npm run build
 PORT=3377 node server.mjs
 ```
 
+## Code layout
+
+- `server.mjs` authenticates, resolves the team workspace, applies rate limits, and hands the request to `routes/*.mjs` (account, team, assets, personas, publishing, episodes, explainers, public feed/OAuth/cron).
+- `lib/conversation-loop.mjs` is the single turn broker used by both the durable workflow (`workflows/episode.mjs`) and the local server (`lib/engine.mjs`).
+- `workflows/*-steps.mjs` hold the durable steps: episode turns, podcast render, explainer planning/recording/mixing, and publishing jobs (shorts, translation, dubbing, YouTube).
+- `public/` is the browser studio; `public/captions.js` and `public/cast.js` are shared with the server.
+
 ## Verification
 
 ```bash
-npm test
+npm run lint
+npm test          # includes end-to-end render tests when ffmpeg is installed
+npm run build
 npm run build
 node scripts/check-stripe-checkout.mjs
 node scripts/check-explainer-render.mjs

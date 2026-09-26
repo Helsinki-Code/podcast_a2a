@@ -1,3 +1,5 @@
+import { captureError } from '../lib/monitor.mjs';
+import { enterUsage } from '../lib/usage.mjs';
 import { episode, setEpisodeFields, putNamedAsset, readAssetBytes, refundCredits, stamp } from '../lib/store.mjs';
 import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';
 import { podcastTimeline, podcastCaptions, podcastCaptionFilter } from '../lib/podcast-timeline.mjs';
@@ -42,6 +44,7 @@ async function renderStage(browser, filename, markup) {
 export async function renderPodcastTimeline(episodeId) {
   'use step';
   const item = await episode(episodeId);
+  enterUsage({ ownerId: item?.ownerId, kind: 'podcast', id: episodeId });
   if (!item) throw new Error('Podcast not found.');
   await setEpisodeFields(episodeId, { videoStatus: 'processing', videoError: null });
   const sourceTimeline = podcastTimeline(item.events || [], { gap: 0 });
@@ -160,6 +163,7 @@ export async function assemblePodcast(browser, item, sourceTimeline, { stem, var
 // because no finished video was delivered.
 export async function failPodcastRender(episodeId, message) {
   'use step';
+  await captureError(new Error(message || 'Podcast rendering failed.'), { kind: 'podcast', id: episodeId, stage: 'render' });
   const item = await episode(episodeId);
   if (item?.creditsCharged && item.ownerId) await refundCredits(item.ownerId, item.creditsCharged, 'podcast', item.creditReference || episodeId);
   const reason = String(message || 'Podcast rendering failed.').slice(0, 2000);

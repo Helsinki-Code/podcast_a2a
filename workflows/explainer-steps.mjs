@@ -1,8 +1,11 @@
+import { captureError } from '../lib/monitor.mjs';
+import { enterUsage } from '../lib/usage.mjs';
 import { explainer, setExplainerFields, putNamedAsset, readAssetBytes, refundCredits, stamp } from '../lib/store.mjs';
 import { modelProviders, speechProviders, supportedVoice } from '../lib/providers.mjs';
 import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';
 import { inspectSandboxMedia, evaluateMediaQuality } from '../lib/media-quality.mjs';
 import { focusFilters } from '../lib/explainer-effects.mjs';
+import { modelFor } from '../lib/models.mjs';
 import { ffmetadata, normalizeChapters, titleFromText } from '../lib/chapters.mjs';
 import { generatedMusicSource, titleMusicFilter } from '../lib/podcast-media.mjs';
 import { generateMetadata, packageVideo } from '../lib/publish-media.mjs';
@@ -251,6 +254,7 @@ export async function explainerRequirements(id) {
 export async function planScene(id, directorState) {
   'use step';
   const item = await explainer(id);
+  enterUsage({ ownerId: item?.ownerId, kind: 'explainer', id: id });
   await setExplainerFields(id, { progress: `Directing scene ${directorState.scene.number}` });
   const provider = modelProviders.get('gateway');
   const computerUse = Boolean(process.env.COMPUTER_USE_SNAPSHOT_ID);
@@ -261,7 +265,7 @@ export async function planScene(id, directorState) {
   const current = planned[directorState.scene.completedScenes];
   const planGuidance = planned.length ? `\nApproved scene plan (follow it in order):\n${planned.map((scene, i) => `${i + 1}. ${scene.title} — goal: ${scene.goal} — narration: ${scene.narration}`).join('\n')}\n${current ? `You are on planned scene ${directorState.scene.completedScenes + 1}: "${current.title}". Achieve its goal with one visible action and use its narration nearly word for word, adjusting only what the screen makes untrue.` : 'Every planned scene is recorded; set done true with a short closing line.'}` : '';
   const context = `Application: ${item.url}\nRequested coverage: ${item.brief}${planGuidance}\nDirector state:\n${JSON.stringify(directorState)}\nChoose the next action from allowedActions. Use remainingMilestones to decide what the walkthrough still needs. Prioritize the first remaining milestone before optional exploration whenever the current screen can perform it. A milestone counts only after a recorded action visibly completes it.${directorState.scene.estimatedBudgetReached && directorState.remainingMilestones.length ? ` The next action must satisfy one of these remaining milestones: ${directorState.remainingMilestones.join(', ')}.` : ''} Set done true only when remainingMilestones is empty and this scene completes the requested coverage.`;
-  const model = process.env.EXPLAINER_MODEL || 'google/gemini-3.1-flash-lite';
+  const model = modelFor('explainer');
   const routing = { user: item.ownerId, tags: ['feature:explainer-director', `mode:${computerUse ? 'computer-use' : 'browser'}`] };
   const sandbox = new VercelEpisodeSandbox(id, () => {});
   await sandbox.dismissOverlays();
@@ -274,6 +278,7 @@ export async function planScene(id, directorState) {
 export async function renderScene(id, index, narration, action) {
   'use step';
   const item = await explainer(id);
+  enterUsage({ ownerId: item?.ownerId, kind: 'explainer', id: id });
   await setExplainerFields(id, { progress: `Recording scene ${index + 1}` });
   const browser = new VercelEpisodeSandbox(id, () => {});
   const speechProvider = item.speechProvider || 'gateway';
@@ -387,6 +392,7 @@ async function mixExplainer(browser, id, item, timeline, { variant = '' } = {}) 
 export async function finishExplainer(id, timeline) {
   'use step';
   const item = await explainer(id);
+  enterUsage({ ownerId: item?.ownerId, kind: 'explainer', id: id });
   const browser = new VercelEpisodeSandbox(id, () => {});
   const output = await mixExplainer(browser, id, item, timeline);
   await setExplainerFields(id, { status: 'complete', progress: 'Complete', endedAt: stamp(), ...output });
@@ -423,6 +429,7 @@ export async function revoiceScenes(browser, item, texts = [], voice = item.voic
 export async function rerenderExplainer(id) {
   'use step';
   const item = await explainer(id);
+  enterUsage({ ownerId: item?.ownerId, kind: 'explainer', id: id });
   if (!item?.scenes?.length) throw new Error('This explainer has no saved scenes to re-render. Restart it instead.');
   await setExplainerFields(id, { progress: 'Re-voicing narration' });
   const browser = new VercelEpisodeSandbox(`rerender-${id}`, () => {});
@@ -439,6 +446,7 @@ export async function rerenderExplainer(id) {
 // A failed re-render keeps the previous video and refunds the re-render charge.
 export async function failExplainerRerender(id, message) {
   'use step';
+  await captureError(new Error(message || 'Re-render failed.'), { kind: 'explainer', id, stage: 'rerender' });
   const item = await explainer(id);
   if (item?.rerenderCredits && item.ownerId) await refundCredits(item.ownerId, item.rerenderCredits, 'explainer', item.rerenderReference || `${id}:rerender`);
   await setExplainerFields(id, { status: 'complete', progress: 'Complete', rerenderCredits: 0, rerenderError: String(message || 'Re-render failed.').slice(0, 2000) });
@@ -448,6 +456,7 @@ export async function failExplainerRerender(id, message) {
 export async function draftExplainerPlan(id) {
   'use step';
   const item = await explainer(id);
+  enterUsage({ ownerId: item?.ownerId, kind: 'explainer', id: id });
   await setExplainerFields(id, { status: 'planning', progress: 'Drafting the scene plan', error: null });
   const browser = new VercelEpisodeSandbox(id, () => {});
   await browser.setViewport(1920, 1080);
@@ -462,8 +471,8 @@ export async function draftExplainerPlan(id) {
   ];
   const routing = { user: item.ownerId, tags: ['feature:explainer-plan'] };
   const result = process.env.COMPUTER_USE_SNAPSHOT_ID && provider.generateVisual
-    ? await provider.generateVisual(messages, capture.image, process.env.EXPLAINER_MODEL || 'google/gemini-3.1-flash-lite', { ...routing, output: 'json' })
-    : await provider.generate(messages, process.env.EXPLAINER_MODEL || process.env.AI_GATEWAY_MODEL, routing);
+    ? await provider.generateVisual(messages, capture.image, modelFor('explainer'), { ...routing, output: 'json' })
+    : await provider.generate(messages, modelFor('explainer'), routing);
   const scenes = normalizePlan(result, budget);
   if (!scenes.length) throw new Error('The planner returned no usable scenes. Make the workflow brief more specific.');
   await setExplainerFields(id, { status: 'awaiting_approval', progress: 'Scene plan ready for review', plan: { scenes, approved: false, createdAt: stamp() } });
@@ -481,11 +490,13 @@ export function normalizePlan(result, budget = 20) {
 
 export async function failExplainerPlan(id, message) {
   'use step';
+  await captureError(new Error(message || 'Planning failed.'), { kind: 'explainer', id, stage: 'plan' });
   await setExplainerFields(id, { status: 'draft', progress: 'Plan could not be drafted', error: String(message || 'Planning failed.').slice(0, 2000) });
 }
 
 export async function failExplainer(id, message) {
   'use step';
+  await captureError(new Error(message || 'Explainer failed.'), { kind: 'explainer', id, stage: 'recording' });
   const item = await explainer(id);
   if (item?.creditsCharged && item.ownerId) await refundCredits(item.ownerId, item.creditsCharged, 'explainer', id);
   await setExplainerFields(id, { status: 'failed', progress: 'Failed', endedAt: stamp(), error: String(message).slice(0, 2000) });

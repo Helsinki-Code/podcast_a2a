@@ -133,3 +133,49 @@ test('persona knowledge is kept by name, stats replace raw text, and test chat c
   const templates = await call('GET', '/api/persona-templates');
   assert.ok(templates.data.length >= 5 && templates.data.every(template => template.systemPrompt && template.voice));
 });
+
+test('teams: invite by email, accept into the owner scope, viewer is read-only, billing is owner-only', async () => {
+  const invite = await call('POST', '/api/team/invites', { body: { email: 'owner@example.com', role: 'viewer' } });
+  assert.equal(invite.status, 201);
+  assert.match(invite.data.link, /\?invite=[a-f0-9]{64}$/);
+  // primaryEmail is mocked to owner@example.com for everyone, so "member" can accept the invite.
+  assert.equal((await call('POST', '/api/team/accept', { user: 'member', body: { token: 'bad' } })).status, 404);
+  const accepted = await call('POST', '/api/team/accept', { user: 'member', body: { token: invite.data.invite.token } });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  const me = await call('GET', '/api/auth/me', { user: 'member' });
+  assert.equal(me.data.role, 'viewer');
+  assert.equal(me.data.workspaceId, 'paid');
+  const personas = await call('GET', '/api/personas', { user: 'member' });
+  assert.equal(personas.status, 200, 'members see the paid owner workspace');
+  assert.ok(personas.data.some(item => item.name === 'Hana'));
+  assert.equal((await call('POST', '/api/personas', { user: 'member', body: { name: 'X', systemPrompt: 'y' } })).status, 403);
+  assert.equal((await call('POST', '/api/billing/topup', { user: 'member', body: { pack: 'small' } })).status, 403);
+  const team = await call('GET', '/api/team');
+  assert.deepEqual(team.data.members.map(member => [member.userId, member.role]), [['member', 'viewer']]);
+  assert.equal((await call('PATCH', '/api/team/members/member', { body: { role: 'editor' } })).status, 200);
+  assert.equal((await call('POST', '/api/personas', { user: 'member', body: { name: 'Editor made', systemPrompt: 'y' } })).status, 201);
+  assert.equal((await call('POST', '/api/team/invites', { user: 'member', body: { email: 'a@b.co' } })).status, 403, 'editors cannot invite');
+  assert.equal((await call('POST', '/api/team/leave', { user: 'member' })).status, 200);
+  assert.equal((await call('GET', '/api/personas', { user: 'member' })).status, 402, 'after leaving, the member has no paid workspace');
+});
+
+test('credits history, rate limits, deletion, and retention settings', async () => {
+  const credits = await call('GET', '/api/credits');
+  assert.equal(credits.status, 200);
+  assert.ok(credits.data.ledger.some(row => row.kind === 'test'));
+  assert.equal(credits.data.topUps.length, 3);
+  process.env.RATE_LIMITS_JSON = JSON.stringify({ 'ai-tools': 2 });
+  const codes = [];
+  for (let i = 0; i < 3; i++) codes.push((await call('POST', '/api/voices/preview', { user: 'limited', body: {} })).status);
+  delete process.env.RATE_LIMITS_JSON;
+  assert.equal(codes[2], 429);
+  const item = { id: store.uid(), ownerId: 'paid', status: 'complete', createdAt: new Date().toISOString(), outline: { subject: 'Delete me' }, settings: {}, turns: [], events: [], mp4: await store.putNamedAsset('delete-me.mp4', Buffer.from('x')) };
+  await store.addEpisode(item);
+  const deleted = await call('DELETE', `/api/episodes/${item.id}`);
+  assert.equal(deleted.status, 200);
+  assert.equal(deleted.data.filesRemoved, 1);
+  assert.equal(await store.episode(item.id), undefined);
+  const settings = await call('PUT', '/api/settings', { body: { retentionDays: 90 } });
+  assert.equal(settings.data.retentionDays, 90);
+  assert.equal((await call('GET', '/api/cron/retention', { user: null })).status, 401);
+});

@@ -8,7 +8,9 @@
     "build": "npm run build:client && next build --webpack",
     "start": "next start",
     "dev": "next dev",
-    "test": "NODE_ENV=test node --test --experimental-test-module-mocks"
+    "test": "NODE_ENV=test node --test --experimental-test-module-mocks",
+    "lint": "eslint .",
+    "check": "npm run lint && npm test"
   },
   "dependencies": {
     "@agent-browser/sandbox": "^0.38.1",
