@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { Sandbox } from '@vercel/sandbox';
 import { installAgentBrowserInVercelSandbox } from '@agent-browser/sandbox/vercel';
+import { DESKTOP_START_SCRIPT } from '../lib/vercel-sandbox.mjs';
 
 function productionValue(name) {
   const pulled = spawnSync('vercel', ['env', 'pull', '/tmp/sales-forge-computer-use.env', '--environment', 'production', '--yes'], { encoding: 'utf8' });
@@ -29,26 +30,8 @@ async function run(label, command, args, timeoutMs = 10 * 60 * 1000) {
   return result;
 }
 
-const startup = `#!/bin/bash
-set -euo pipefail
-SESSION="\${1:-default}"
-export DISPLAY=:99
-if ! pgrep -x Xvnc >/dev/null; then
-  Xvnc :99 -geometry 1920x1080 -depth 24 -SecurityTypes None -AlwaysShared -rfbport 5900 >/tmp/xvnc.log 2>&1 &
-  for i in $(seq 1 40); do xdpyinfo -display :99 >/dev/null 2>&1 && break; sleep .25; done
-fi
-pgrep -x openbox >/dev/null || (openbox >/tmp/openbox.log 2>&1 &)
-if ! pgrep -f 'websockify.*6080' >/dev/null; then
-  websockify --web /usr/share/novnc 6080 localhost:5900 >/tmp/novnc.log 2>&1 &
-fi
-if ! curl -fsS http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
-  PROFILE="/tmp/chrome-profile-$(echo "$SESSION" | tr -cd 'A-Za-z0-9_-')"
-  google-chrome --no-sandbox --disable-gpu --no-first-run --disable-default-apps --disable-dev-shm-usage --disable-save-password-bubble --password-store=basic --disable-features=Translate,PasswordManagerOnboarding,PasswordLeakDetection --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="$PROFILE" --window-size=1920,1080 --start-maximized about:blank >/tmp/chrome.log 2>&1 &
-fi
-for i in $(seq 1 80); do curl -fsS http://127.0.0.1:9222/json/version >/dev/null 2>&1 && exit 0; sleep .25; done
-echo 'Chrome CDP did not become ready' >&2
-exit 1
-`;
+// The same script the app uploads before each desktop start (see lib/vercel-sandbox.mjs).
+const startup = DESKTOP_START_SCRIPT;
 
 try {
   const hasAgentBrowser = await sandbox.runCommand('agent-browser', ['--version']);
