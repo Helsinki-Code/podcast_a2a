@@ -5,6 +5,7 @@ import { inspectSandboxMedia, evaluateMediaQuality } from '../lib/media-quality.
 import { focusFilters } from '../lib/explainer-effects.mjs';
 import { ffmetadata, normalizeChapters, titleFromText } from '../lib/chapters.mjs';
 import { generatedMusicSource, titleMusicFilter } from '../lib/podcast-media.mjs';
+import { generateMetadata, packageVideo } from '../lib/publish-media.mjs';
 
 const safeName = value => String(value).replace(/[^a-zA-Z0-9._-]/g, '_');
 const srtText = text => String(text).replace(/\r?\n/g, ' ').replace(/<[^>]+>/g, '');
@@ -336,20 +337,8 @@ async function explainerCard(browser, item, kind, seconds) {
   return { video: videoPath, audio: audioPath, duration: seconds };
 }
 
-async function explainerSummary(item, timeline) {
-  const provider = modelProviders.get('gateway');
-  if (!provider?.ready?.()) return null;
-  try {
-    const result = await provider.generate([
-      { role: 'system', content: 'You write metadata for a product walkthrough video. Return JSON {"summary":string,"chapterTitles":[string]}. summary: two or three plain sentences describing what the viewer learns. chapterTitles: one short title (2-5 words, no numbering) per scene, in order.' },
-      { role: 'user', content: `Video: ${item.title}\nApplication: ${item.url}\nScenes:\n${timeline.map((part, i) => `${i + 1}. ${part.text}`).join('\n')}` }
-    ], process.env.AI_GATEWAY_MODEL, { user: item.ownerId, tags: ['feature:explainer-metadata'] });
-    return { summary: String(result?.summary || '').trim().slice(0, 1200), chapterTitles: Array.isArray(result?.chapterTitles) ? result.chapterTitles.map(String) : [] };
-  } catch { return null; }
-}
-
 // Shared by the first render and by re-renders: cards, captions, chapters, mix, quality check, upload.
-async function mixExplainer(browser, id, item, timeline) {
+async function mixExplainer(browser, id, item, timeline, { variant = '' } = {}) {
   await setExplainerFields(id, { progress: 'Mixing narration, picture, and subtitles' });
   const branding = item.branding || {};
   const intro = branding.intro && item.brand ? await explainerCard(browser, item, 'intro', 3.5) : null;
@@ -357,7 +346,7 @@ async function mixExplainer(browser, id, item, timeline) {
   const pieces = [...(intro ? [intro] : []), ...timeline, ...(outro ? [outro] : [])];
   const captionOptions = { style: item.captionStyle || 'studio', ...(item.captionOptions || {}), offset: intro?.duration || 0 };
   const captions = buildCaptions(timeline, captionOptions);
-  const metadata = await explainerSummary(item, timeline);
+  const metadata = variant ? null : await generateMetadata('explainer', item, timeline.map(part => ({ text: part.text })));
   let cursor = intro?.duration || 0;
   const rawChapters = [];
   if (intro) rawChapters.push({ start: 0, title: 'Introduction' });
@@ -367,7 +356,7 @@ async function mixExplainer(browser, id, item, timeline) {
   await browser.writeSandboxFile('/tmp/videos.txt', pieces.map(part => `file '${part.video}'`).join('\n'));
   await browser.writeSandboxFile('/tmp/audio.txt', pieces.map(part => `file '${part.audio}'`).join('\n'));
   await browser.writeSandboxFile('/tmp/captions.srt', captions);
-  await browser.writeSandboxFile('/tmp/chapters.txt', ffmetadata(chapters, totalDuration, { title: item.title, comment: metadata?.summary }));
+  await browser.writeSandboxFile('/tmp/chapters.txt', ffmetadata(chapters, totalDuration, { title: item.title, comment: metadata?.description }));
   let result = await browser.run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', '/tmp/videos.txt', '-an', '-vf', 'fps=30,format=yuv420p', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '/tmp/picture.mp4'], 10 * 60 * 1000);
   if (result.exitCode) throw new Error(`Could not assemble browser recording: ${(await result.stderr()).slice(-1200)}`);
   result = await browser.run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', '/tmp/audio.txt', '-c:a', 'aac', '-b:a', '192k', '/tmp/narration.m4a'], 10 * 60 * 1000);
@@ -381,11 +370,15 @@ async function mixExplainer(browser, id, item, timeline) {
   quality.uniqueFrames = interactiveActions.reduce((sum, part) => sum + Number(part.metrics?.uniqueFrames || 0), 0);
   const verdict = evaluateMediaQuality(quality, { interactive: interactiveActions.length > 0, minDuration: Math.max(4, timeline.length * 1.5), maxSilencePercent: 35, maxSilenceSeconds: 2 });
   if (!verdict.passed) throw new Error(`Explainer quality check failed: ${verdict.failures.join(' ')}`);
+  const stem = `explainer-${safeName(id)}${item.renderVersion ? `-v${item.renderVersion}` : ''}${variant ? `-${safeName(variant)}` : ''}`;
+  let exportCursor = intro?.duration || 0;
+  const exportTimeline = timeline.map(part => { const entry = { speaker: '', text: part.text, start: Number(exportCursor.toFixed(3)), duration: Number(Math.min(part.duration, Number(part.captionDuration) || part.duration).toFixed(3)) }; exportCursor += part.duration; return entry; });
+  const packaged = variant ? {} : await packageVideo(browser, { kind: 'explainer', item, finalPath: '/tmp/final.mp4', timeline: exportTimeline, totalDuration, chapters, stem, accent: item.brand?.accentColor || '#80ded1', metadata });
   const [video, srt] = await Promise.all([browser.readSandboxFile('/tmp/final.mp4'), browser.readSandboxFile('/tmp/captions.srt')]);
-  const stem = `explainer-${safeName(id)}${item.renderVersion ? `-v${item.renderVersion}` : ''}`;
   const [videoUrl, captionsUrl] = await Promise.all([putNamedAsset(`${stem}.mp4`, video), putNamedAsset(`${stem}.srt`, srt)]);
   return {
-    video: videoUrl, captions: captionsUrl, quality, chapters, summary: metadata?.summary || '',
+    video: videoUrl, captions: captionsUrl, quality, chapters, summary: metadata?.description?.split(/\n\s*\n/)[0] || '',
+    timeline: exportTimeline, duration: totalDuration, youtube: packaged.youtube, thumbnail: packaged.thumbnail, mp3: packaged.mp3,
     transcript: timeline.map(part => part.text), actions: timeline.map(part => part.action),
     scenes: timeline.map((part, index) => ({ text: part.text, title: rawChapters[index + (intro ? 1 : 0)]?.title || '', video: part.sceneAsset, duration: part.duration, captionDuration: part.captionDuration, action: part.action, screenChanged: part.screenChanged, metrics: part.metrics })).filter(scene => scene.video)
   };
@@ -400,6 +393,32 @@ export async function finishExplainer(id, timeline) {
   await browser.close().catch(() => {});
 }
 
+// Voices each saved scene with new text and retimes its clip to the new narration length.
+export async function revoiceScenes(browser, item, texts = [], voice = item.voice) {
+  const speechProvider = item.speechProvider || 'gateway';
+  const speech = speechProviders.get(speechProvider);
+  if (!speech) throw new Error('The narration voice provider is unavailable.');
+  const timeline = [];
+  for (const [index, scene] of item.scenes.entries()) {
+    const text = String(texts[index] ?? scene.text);
+    const generated = await speech.synthesize(text, supportedVoice(speechProvider, voice, 'coral'), { style: 'clear, friendly product walkthrough narrator' });
+    const chunks = [];
+    for await (const chunk of Buffer.isBuffer(generated) || generated instanceof Uint8Array ? [generated] : generated) chunks.push(Buffer.from(chunk));
+    const audioPath = `/tmp/rerender-${index}.mp3`, sourcePath = `/tmp/rerender-source-${index}.mp4`, videoPath = `/tmp/rerender-${index}.mp4`, paddedPath = `/tmp/rerender-${index}.m4a`;
+    await browser.writeSandboxFile(audioPath, Buffer.concat(chunks));
+    await browser.writeSandboxFile(sourcePath, await readAssetBytes(scene.video));
+    const probe = await browser.run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audioPath]);
+    const speechDuration = Math.max(2, Math.min(40, Number((await probe.stdout()).trim()) || 8));
+    const ratio = Math.max(0.6, Math.min(1.6, speechDuration / Math.max(0.5, Number(scene.duration) || speechDuration)));
+    let result = await browser.run('ffmpeg', ['-y', '-i', sourcePath, '-vf', `setpts=${ratio.toFixed(6)}*PTS,tpad=stop_mode=clone:stop_duration=40,fps=30,format=yuv420p`, '-t', speechDuration.toFixed(3), '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', videoPath], 10 * 60 * 1000);
+    if (result.exitCode) throw new Error(`Could not retime scene ${index + 1}: ${(await result.stderr()).slice(-800)}`);
+    result = await browser.run('ffmpeg', ['-y', '-i', audioPath, '-af', 'apad', '-t', speechDuration.toFixed(3), '-c:a', 'aac', '-b:a', '192k', paddedPath], 5 * 60 * 1000);
+    if (result.exitCode) throw new Error(`Could not align narration ${index + 1}: ${(await result.stderr()).slice(-800)}`);
+    timeline.push({ ...scene, text, duration: speechDuration, captionDuration: speechDuration, video: videoPath, audio: paddedPath, sceneAsset: scene.video });
+  }
+  return timeline;
+}
+
 // Re-voices and re-captions the saved scene clips: each clip is retimed to its new narration.
 export async function rerenderExplainer(id) {
   'use step';
@@ -408,26 +427,7 @@ export async function rerenderExplainer(id) {
   await setExplainerFields(id, { progress: 'Re-voicing narration' });
   const browser = new VercelEpisodeSandbox(`rerender-${id}`, () => {});
   try {
-    const speechProvider = item.speechProvider || 'gateway';
-    const speech = speechProviders.get(speechProvider);
-    if (!speech) throw new Error('The narration voice provider is unavailable.');
-    const timeline = [];
-    for (const [index, scene] of item.scenes.entries()) {
-      const generated = await speech.synthesize(scene.text, supportedVoice(speechProvider, item.voice, 'coral'), { style: 'clear, friendly product walkthrough narrator' });
-      const chunks = [];
-      for await (const chunk of Buffer.isBuffer(generated) || generated instanceof Uint8Array ? [generated] : generated) chunks.push(Buffer.from(chunk));
-      const audioPath = `/tmp/rerender-${index}.mp3`, sourcePath = `/tmp/rerender-source-${index}.mp4`, videoPath = `/tmp/rerender-${index}.mp4`, paddedPath = `/tmp/rerender-${index}.m4a`;
-      await browser.writeSandboxFile(audioPath, Buffer.concat(chunks));
-      await browser.writeSandboxFile(sourcePath, await readAssetBytes(scene.video));
-      const probe = await browser.run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audioPath]);
-      const speechDuration = Math.max(2, Math.min(40, Number((await probe.stdout()).trim()) || 8));
-      const ratio = Math.max(0.6, Math.min(1.6, speechDuration / Math.max(0.5, Number(scene.duration) || speechDuration)));
-      let result = await browser.run('ffmpeg', ['-y', '-i', sourcePath, '-vf', `setpts=${ratio.toFixed(6)}*PTS,tpad=stop_mode=clone:stop_duration=40,fps=30,format=yuv420p`, '-t', speechDuration.toFixed(3), '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', videoPath], 10 * 60 * 1000);
-      if (result.exitCode) throw new Error(`Could not retime scene ${index + 1}: ${(await result.stderr()).slice(-800)}`);
-      result = await browser.run('ffmpeg', ['-y', '-i', audioPath, '-af', 'apad', '-t', speechDuration.toFixed(3), '-c:a', 'aac', '-b:a', '192k', paddedPath], 5 * 60 * 1000);
-      if (result.exitCode) throw new Error(`Could not align narration ${index + 1}: ${(await result.stderr()).slice(-800)}`);
-      timeline.push({ ...scene, duration: speechDuration, captionDuration: speechDuration, video: videoPath, audio: paddedPath, sceneAsset: scene.video });
-    }
+    const timeline = await revoiceScenes(browser, item, item.scenes.map(scene => scene.text));
     const renderVersion = (Number(item.renderVersion) || 0) + 1;
     const output = await mixExplainer(browser, id, { ...item, renderVersion }, timeline);
     await setExplainerFields(id, { status: 'complete', progress: 'Complete', renderVersion, renderedAt: stamp(), rerenderError: null, ...output });
@@ -491,3 +491,5 @@ export async function failExplainer(id, message) {
   await setExplainerFields(id, { status: 'failed', progress: 'Failed', endedAt: stamp(), error: String(message).slice(0, 2000) });
   await new VercelEpisodeSandbox(id, () => {}).close().catch(() => {});
 }
+
+export { mixExplainer };

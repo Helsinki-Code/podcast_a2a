@@ -57,4 +57,12 @@ test('podcast render assembles a panel episode with cards, captions, music bed, 
   assert.match(srt, /^1\n00:00:04,500 --> /, 'captions start after the intro card');
   assert.match(srt, /CO-HOST: Great point/);
   assert.match(srt, /GUEST 2: And I would add/);
+  assert.match(saved.thumbnail, /-thumbnail\.jpg$/);
+  const thumb = probe(path.join(temp, 'data/assets', saved.thumbnail.split('/').pop()));
+  assert.equal(thumb.streams[0].width, 1280);
+  assert.ok(saved.mp3.bytes > 1000);
+  assert.equal(saved.timeline.length, 4);
+  assert.equal(saved.timeline[0].speaker, 'Hana (HOST)');
+  assert.equal(saved.timeline[0].start, 4.5);
+  assert.equal(saved.youtube.title, 'Render test');
 });

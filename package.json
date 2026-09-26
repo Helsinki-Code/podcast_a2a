@@ -30,6 +30,8 @@
     "workflow": "^4.8.9"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.8"
+    "@electric-sql/pglite": "^0.5.8",
+    "eslint": "^9.39.5",
+    "globals": "^17.12.0"
   }
 }

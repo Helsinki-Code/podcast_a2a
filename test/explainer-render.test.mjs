@@ -42,6 +42,8 @@ test('explainer mix adds brand cards, chapters, loudness, and re-renders edited 
   assert.ok(Number(first.format.duration) > 36 + 3.5 + 4 - 0.5);
   const srt = await readFile(path.join(temp, 'data/assets', saved.captions.split('/').pop()), 'utf8');
   assert.match(srt, /^1\n00:00:03,500 --> /);
+  assert.ok(saved.thumbnail && saved.mp3?.url);
+  assert.deepEqual(saved.timeline.map(part => part.start), [3.5, 15.5, 27.5]);
 
   saved.scenes[1].text = 'A much shorter line.';
   await store.saveExplainer({ ...saved, status: 'rendering' });
