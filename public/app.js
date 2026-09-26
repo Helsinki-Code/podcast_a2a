@@ -5,7 +5,7 @@ import { CAST_ROLES, castRoles, roleAccent, roleLabel } from './cast.js';
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const esc = text => String(text ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = { personas: [], episodes: [], explainers: [], config: null, account: null, clerk: null, current: null, eventSource: null, pollTimer: null, explainerPoll: null, recorder: null, recorderChunks: [], audioContext: null, audioElement: null, speechElements: {}, sandboxAudioElement: null, sandboxPlaying: false, screenVideoElement: null, screenVideoPlaying: false, pendingSandboxAudio: null, audioUnlock: null, analyser: null, audioDestination: null, queue: [], playing: false, screen: { type: 'idle', title: 'The stage is ready', content: '' }, speaker: null, caption: '', amplitude: 0, startTime: 0, roleImages: {}, screenImage: null, ended: false, seen: new Set(), credentials: new Map(), localVideoUrl: null, mediaCancels: new Map(), cursor: 0 };
+const state = { personas: [], episodes: [], explainers: [], config: null, account: null, clerk: null, current: null, eventSource: null, pollTimer: null, explainerPoll: null, recorder: null, recorderChunks: [], audioContext: null, audioElement: null, speechElements: {}, sandboxAudioElement: null, sandboxPlaying: false, screenVideoElement: null, screenVideoPlaying: false, pendingSandboxAudio: null, audioUnlock: null, analyser: null, audioDestination: null, queue: [], playing: false, screen: { type: 'idle', title: 'The stage is ready', content: '' }, speaker: null, caption: '', amplitude: 0, startTime: 0, roleImages: {}, screenImage: null, ended: false, seen: new Set(), credentials: new Map(), localVideoUrl: null, mediaCancels: new Map(), cursor: 0, awaitingPlan: new Set() };
 
 async function api(path, options = {}) {
   const token = await state.clerk?.session?.getToken().catch(() => null);
@@ -19,6 +19,7 @@ function notice(message, good = false) { const el = $('#notice'); el.textContent
 async function refresh() { const [personas, episodes, explainers, config] = await Promise.all([api('/api/personas'), api('/api/episodes'), api('/api/explainers'), api('/api/config')]); state.personas = personas; state.episodes = episodes; state.explainers = explainers; state.config = config; render(); }
 function person(id) { return state.personas.find(p => p.id === id); }
 function episodePerson(episode, role) { return episode?.personas?.[role] || person(episode?.[`${role}Id`]); }
+function formatClock(seconds) { const total = Math.floor(Number(seconds) || 0); return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`; }
 function shortDate(date) { return new Date(date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }); }
 function avatar(p, big = false) { return p?.image ? `<img class="${big?'avatar-lg':'avatar'}" src="${esc(p.image)}" alt="">` : `<span class="${big?'avatar-lg':'avatar'}">${esc((p?.name || '?')[0].toUpperCase())}</span>`; }
 function navigate(name) { $$('.view').forEach(v => v.classList.add('hidden')); $(`#view-${name}`).classList.remove('hidden'); $$('.nav').forEach(b => b.classList.toggle('active', b.dataset.view === name)); $('#crumb').textContent = name.toUpperCase(); window.scrollTo(0, 0); }
@@ -31,7 +32,7 @@ function render() {
   $('#recentPersonas').innerHTML = state.personas.length ? state.personas.slice(0, 6).map(p => `<div class="persona-chip">${avatar(p)}${esc(p.name)}</div>`).join('') : '<div class="empty">Your cast starts with a persona.</div>';
   $('#personaGrid').innerHTML = state.personas.length ? state.personas.map(p => `<article class="persona-card">${avatar(p,true)}<h3>${esc(p.name)}</h3><p>${esc(p.systemPrompt)}</p><div class="persona-card-foot"><span>${p.knowledge?.length || 0} knowledge files · ${esc(p.voice)}</span><button data-edit="${p.id}">Edit →</button></div></article>`).join('') : '<div class="empty"><strong>No personas yet</strong>Create a host and a guest to begin.</div>';
   $('#episodeList').innerHTML = state.episodes.length ? state.episodes.map(e => `<article class="episode-row" data-episode="${e.id}" role="button" tabindex="0"><div><div class="eyebrow">${shortDate(e.createdAt)}</div><h3>${esc(e.outline.subject)}</h3><p>${esc(episodePerson(e,'host')?.name || 'Host')} × ${esc(episodePerson(e,'guest')?.name || 'Guest')} · ${e.turns?.length || 0} spoken segments</p></div><div class="episode-row-right"><span class="tag ${esc(e.status)}">${esc(e.status)}</span>${e.video || e.mp4 ? `<a class="row-download" href="${esc(e.mp4 || e.video)}" download>Download video</a>` : ''}${['complete','stopped','failed','interrupted'].includes(e.status) ? `<button class="row-action" data-restart-episode="${esc(e.id)}">Restart · 20 credits</button>` : ''}${e.error || e.videoError ? errorMarkup(e.error || e.videoError) : ''}<span class="card-arrow">↗</span></div></article>`).join('') : '<div class="empty"><strong>Nothing recorded yet</strong>Create an episode to start the archive.</div>';
-  $('#explainerList').innerHTML = state.explainers.length ? state.explainers.map(e => `<article class="episode-row explainer-row"><div><div class="eyebrow">${shortDate(e.createdAt)} · ${esc(new URL(e.url).hostname)}</div><h3>${esc(e.title)}</h3><p>${esc(e.progress || e.brief)}</p></div><div class="episode-row-right"><span class="tag ${esc(e.status)}">${esc(e.status)}</span>${e.video ? `<a class="row-download" href="${esc(e.video)}" download>Download MP4</a><a class="row-download secondary" href="${esc(e.captions)}" download>Captions</a>` : ''}${e.status === 'draft' && e.authRequired ? `<button class="row-action" data-retry-explainer="${esc(e.id)}">Resume secure sign-in</button>` : ''}${['complete','failed'].includes(e.status) ? `<button class="row-action" data-restart-explainer="${esc(e.id)}">Restart · 30 credits</button>` : ''}${e.error ? errorMarkup(e.error) : ''}</div></article>`).join('') : '<div class="empty"><strong>No explainers yet</strong>Give the agent a URL and the workflow your customer needs to understand.</div>';
+  $('#explainerList').innerHTML = state.explainers.length ? state.explainers.map(e => `<article class="episode-row explainer-row"><div><div class="eyebrow">${shortDate(e.createdAt)} · ${esc(new URL(e.url).hostname)}</div><h3>${esc(e.title)}</h3><p>${esc(e.summary || e.progress || e.brief)}</p>${e.chapters?.length ? `<ol class="chapter-list">${e.chapters.map(chapter => `<li><span>${formatClock(chapter.start)}</span> ${esc(chapter.title)}</li>`).join('')}</ol>` : ''}</div><div class="episode-row-right"><span class="tag ${esc(e.status)}">${esc(e.status.replace('_', ' '))}</span>${e.video ? `<a class="row-download" href="${esc(e.video)}" download>Download MP4</a><a class="row-download secondary" href="${esc(e.captions)}" download>Captions</a>` : ''}${e.status === 'awaiting_approval' ? `<button class="row-action primary" data-review-plan="${esc(e.id)}">Review scene plan</button>` : ''}${e.status === 'complete' && e.scenes?.length ? `<button class="row-action" data-rerender-explainer="${esc(e.id)}">Edit &amp; re-render · 10 credits</button>` : ''}${e.status === 'draft' && e.authRequired ? `<button class="row-action" data-retry-explainer="${esc(e.id)}">Resume secure sign-in</button>` : ''}${['complete','failed'].includes(e.status) ? `<button class="row-action" data-restart-explainer="${esc(e.id)}">Restart · 30 credits</button>` : ''}${e.error ? errorMarkup(e.error) : ''}${e.rerenderError ? errorMarkup(e.rerenderError) : ''}</div></article>`).join('') : '<div class="empty"><strong>No explainers yet</strong>Give the agent a URL and the workflow your customer needs to understand.</div>';
   renderAccount();
 }
 
@@ -514,7 +515,10 @@ async function saveExplainerForm(event) {
       captionOptions: { enabled: form.elements.captionsEnabled.checked, font: form.elements.captionFont.value, size: +form.elements.captionSize.value, textColor: form.elements.captionTextColor.value, backgroundColor: form.elements.captionBackgroundColor.value, position: form.elements.captionPosition.value, wordsPerCue: +form.elements.captionWords.value },
       loginUrl: form.elements.loginUrl.value,
       usernameSelector: form.elements.usernameSelector.value, passwordSelector: form.elements.passwordSelector.value,
-      submitSelector: form.elements.submitSelector.value
+      submitSelector: form.elements.submitSelector.value,
+      reviewPlan: form.elements.reviewPlan.checked,
+      effects: { zoom: form.elements.effectZoom.checked, highlight: form.elements.effectHighlight.checked },
+      branding: { intro: form.elements.brandIntro.checked, outro: form.elements.brandOutro.checked }
     }) });
     if (authRequired) {
       button.textContent = 'Signing in privately…';
@@ -525,11 +529,8 @@ async function saveExplainerForm(event) {
       }) });
       form.elements.password.value = '';
     }
-    button.textContent = 'Starting workflow…';
-    await api(`/api/explainers/${item.id}/start`, { method: 'POST' });
+    await beginExplainerProduction(item, form.elements.reviewPlan.checked, button);
     $('#explainerDialog').close();
-    await refreshMe(); await refresh(); navigate('explainers'); scheduleExplainerPoll();
-    notice('The explainer is in production.', true);
   } catch (error) {
     if (item?.id && form.elements.authRequired.checked) {
       form.dataset.explainerId = item.id;
@@ -540,10 +541,88 @@ async function saveExplainerForm(event) {
   finally { button.disabled = false; button.textContent = 'Create and generate'; }
 }
 
+// After sign-in: either draft a plan for review (free) or start recording straight away.
+async function beginExplainerProduction(item, reviewPlan, button = null) {
+  if (reviewPlan) {
+    if (button) button.textContent = 'Drafting scene plan…';
+    await api(`/api/explainers/${item.id}/plan`, { method: 'POST' });
+    state.awaitingPlan.add(item.id);
+    await refresh(); navigate('explainers'); scheduleExplainerPoll();
+    notice('Drafting a scene plan. You can review and edit it before anything is recorded.', true);
+    return;
+  }
+  if (button) button.textContent = 'Starting workflow…';
+  await api(`/api/explainers/${item.id}/start`, { method: 'POST' });
+  await refreshMe(); await refresh(); navigate('explainers'); scheduleExplainerPoll();
+  notice('The explainer is in production.', true);
+}
 function scheduleExplainerPoll() {
   clearTimeout(state.explainerPoll);
-  if (!state.explainers.some(item => ['queued','running'].includes(item.status))) return;
-  state.explainerPoll = setTimeout(async () => { try { await refresh(); scheduleExplainerPoll(); } catch (error) { notice(error.message); } }, 4000);
+  if (!state.explainers.some(item => ['queued','running','planning','rendering'].includes(item.status))) return;
+  state.explainerPoll = setTimeout(async () => {
+    try {
+      await refresh(); scheduleExplainerPoll();
+      const ready = state.explainers.find(item => item.status === 'awaiting_approval' && state.awaitingPlan.has(item.id));
+      if (ready && !document.querySelector('dialog[open]')) { state.awaitingPlan.delete(ready.id); openPlanDialog(ready); }
+    } catch (error) { notice(error.message); }
+  }, 4000);
+}
+function planSceneMarkup(scene = {}, editable = true) {
+  return `<li class="plan-scene"><div class="form-row"><label>Title<input name="title" maxlength="60" value="${esc(scene.title || '')}"></label>${editable ? '<button type="button" class="icon-button" data-remove-scene title="Remove scene">×</button>' : ''}</div><label>What happens<input name="goal" maxlength="240" value="${esc(scene.goal || '')}"></label><label>Narration<textarea name="narration" rows="2" maxlength="360">${esc(scene.narration || scene.text || '')}</textarea></label></li>`;
+}
+function openPlanDialog(item) {
+  const form = $('#planForm'); form.dataset.explainerId = item.id;
+  $('#planScenes').innerHTML = (item.plan?.scenes || []).map(scene => planSceneMarkup(scene)).join('');
+  $('#planDialog').showModal();
+}
+function readPlanScenes() {
+  return [...$('#planScenes').querySelectorAll('.plan-scene')].map(row => ({ title: row.querySelector('[name=title]').value, goal: row.querySelector('[name=goal]').value, narration: row.querySelector('[name=narration]').value }));
+}
+async function approvePlan(event) {
+  event.preventDefault();
+  const form = event.currentTarget, id = form.dataset.explainerId, button = form.querySelector('[type=submit]'); button.disabled = true;
+  try {
+    await api(`/api/explainers/${id}/plan`, { method: 'PUT', body: JSON.stringify({ scenes: readPlanScenes() }) });
+    await api(`/api/explainers/${id}/start`, { method: 'POST' });
+    $('#planDialog').close(); await refreshMe(); await refresh(); scheduleExplainerPoll();
+    notice('Plan approved. The explainer is recording.', true);
+  } catch (error) { notice(error.message); } finally { button.disabled = false; }
+}
+function openRerenderDialog(item) {
+  const form = $('#rerenderForm'); form.dataset.explainerId = item.id;
+  form.elements.voice.value = item.voice || 'coral'; form.elements.captionStyle.value = item.captionStyle || 'studio'; form.elements.captionsEnabled.checked = item.captionOptions?.enabled !== false;
+  $('#rerenderScenes').innerHTML = item.scenes.map(scene => `<li class="plan-scene"><strong>${esc(scene.title || 'Scene')}</strong><label>Narration<textarea name="text" rows="2" maxlength="400">${esc(scene.text)}</textarea></label></li>`).join('');
+  $('#rerenderDialog').showModal();
+}
+async function submitRerender(event) {
+  event.preventDefault();
+  const form = event.currentTarget, id = form.dataset.explainerId, button = form.querySelector('[type=submit]'); button.disabled = true;
+  const item = state.explainers.find(entry => entry.id === id);
+  try {
+    const scenes = [...$('#rerenderScenes').querySelectorAll('textarea')].map(area => ({ text: area.value }));
+    await api(`/api/explainers/${id}/rerender`, { method: 'POST', body: JSON.stringify({ scenes, voice: form.elements.voice.value, captionStyle: form.elements.captionStyle.value, captionOptions: { ...(item?.captionOptions || {}), enabled: form.elements.captionsEnabled.checked } }) });
+    $('#rerenderDialog').close(); await refreshMe(); await refresh(); scheduleExplainerPoll();
+    notice('Re-rendering with the new narration. The current video stays available until it finishes.', true);
+  } catch (error) { notice(error.message); } finally { button.disabled = false; }
+}
+async function openBrandDialog() {
+  const form = $('#brandForm'); form.reset();
+  const kit = await api('/api/brand').catch(() => ({}));
+  for (const name of ['name','outroText','callToAction']) form.elements[name].value = kit[name] || '';
+  form.elements.primaryColor.value = kit.primaryColor || '#101c24'; form.elements.accentColor.value = kit.accentColor || '#80ded1';
+  form._logo = kit.logo || '';
+  $('#brandLogoPreview').innerHTML = form._logo ? `<img src="${esc(form._logo)}" alt="Current logo">` : 'No logo';
+  $('#brandDialog').showModal();
+}
+async function saveBrand(event) {
+  event.preventDefault();
+  const form = event.currentTarget, button = form.querySelector('[type=submit]'); button.disabled = true;
+  try {
+    const file = form.elements.logoFile.files[0];
+    if (file) form._logo = (await uploadFile(file, 'logo')).asset;
+    await api('/api/brand', { method: 'PUT', body: JSON.stringify({ name: form.elements.name.value, logo: form._logo, primaryColor: form.elements.primaryColor.value, accentColor: form.elements.accentColor.value, outroText: form.elements.outroText.value, callToAction: form.elements.callToAction.value }) });
+    $('#brandDialog').close(); notice('Brand kit saved. New videos will use it.', true);
+  } catch (error) { notice(error.message); } finally { button.disabled = false; }
 }
 
 async function refreshMe() {
@@ -597,7 +676,7 @@ $$('.close-dialog').forEach(b=>b.addEventListener('click',()=>b.closest('dialog'
 $('#personaForm').addEventListener('submit',savePersona);$('#episodeForm').addEventListener('submit',saveEpisode);
 $('#explainerForm').addEventListener('submit',saveExplainerForm);
 $('#openExplainerDesktop').addEventListener('click',async()=>{const id=$('#explainerForm').dataset.explainerId;if(!id)return notice('Create the explainer first.');const popup=window.open('about:blank','_blank');if(popup)popup.opener=null;try{const{liveUrl}=await api(`/api/explainers/${id}/desktop`);if(popup)popup.location=liveUrl;else window.open(liveUrl,'_blank','noopener')}catch(error){popup?.close();notice(error.message)}});
-$('#explainerDesktopReady').addEventListener('click',async()=>{const form=$('#explainerForm'),id=form.dataset.explainerId,button=$('#explainerDesktopReady');if(!id)return notice('Create the explainer first.');button.disabled=true;try{await api(`/api/explainers/${id}/desktop-ready`,{method:'POST'});await api(`/api/explainers/${id}/start`,{method:'POST'});form.elements.password.value='';$('#explainerDialog').close();await refreshMe();await refresh();navigate('explainers');scheduleExplainerPoll();notice('The explainer is in production.',true)}catch(error){notice(error.message)}finally{button.disabled=false}});
+$('#explainerDesktopReady').addEventListener('click',async()=>{const form=$('#explainerForm'),id=form.dataset.explainerId,button=$('#explainerDesktopReady');if(!id)return notice('Create the explainer first.');button.disabled=true;try{await api(`/api/explainers/${id}/desktop-ready`,{method:'POST'});form.elements.password.value='';await beginExplainerProduction({id},form.elements.reviewPlan.checked);$('#explainerDialog').close()}catch(error){notice(error.message)}finally{button.disabled=false}});
 $('#explainerForm').elements.authRequired.addEventListener('change',event=>{$('#explainerCredentials').classList.toggle('hidden',!event.target.checked);for(const name of ['username','password'])$('#explainerForm').elements[name].required=event.target.checked});
 for (const name of ['captionsEnabled','captionStyle','captionPosition','captionFont','captionSize','captionTextColor','captionBackgroundColor','captionWords']) $('#explainerForm').elements[name].addEventListener('input',updateSubtitlePreview);
 $('#personaForm').elements.imageFile.addEventListener('change',event=>{const file=event.target.files[0];if(file)$('#imagePreview').innerHTML=`<img src="${URL.createObjectURL(file)}" alt="Image preview">`});
@@ -612,6 +691,18 @@ document.addEventListener('click',event=>{const ep=event.target.closest('[data-e
 document.addEventListener('click', event => { const retry = event.target.closest('[data-retry-explainer]'); if (retry) openExplainerDialog(state.explainers.find(item => item.id === retry.dataset.retryExplainer)); });
 document.addEventListener('click', event => { const podcast = event.target.closest('[data-restart-episode]'); if (podcast) restartPodcast(podcast.dataset.restartEpisode).catch(error => notice(error.message)); const explainer = event.target.closest('[data-restart-explainer]'); if (explainer) restartExplainer(explainer.dataset.restartExplainer).catch(error => notice(error.message)); });
 $('#backToEpisodes').addEventListener('click',()=>navigate('episodes'));
+$('#planForm').addEventListener('submit', approvePlan);
+$('#rerenderForm').addEventListener('submit', submitRerender);
+$('#brandForm').addEventListener('submit', saveBrand);
+$('#addPlanScene').addEventListener('click', () => $('#planScenes').insertAdjacentHTML('beforeend', planSceneMarkup()));
+$('#redraftPlan').addEventListener('click', async () => { const id = $('#planForm').dataset.explainerId; try { await api(`/api/explainers/${id}/plan`, { method: 'POST' }); state.awaitingPlan.add(id); $('#planDialog').close(); await refresh(); scheduleExplainerPoll(); notice('Redrafting the scene plan…', true); } catch (error) { notice(error.message); } });
+$('#brandForm').elements.logoFile.addEventListener('change', event => { const file = event.target.files[0]; if (file) $('#brandLogoPreview').innerHTML = `<img src="${URL.createObjectURL(file)}" alt="Logo preview">`; });
+document.addEventListener('click', event => {
+  if (event.target.closest('[data-remove-scene]')) event.target.closest('.plan-scene').remove();
+  const review = event.target.closest('[data-review-plan]'); if (review) openPlanDialog(state.explainers.find(item => item.id === review.dataset.reviewPlan));
+  const rerender = event.target.closest('[data-rerender-explainer]'); if (rerender) openRerenderDialog(state.explainers.find(item => item.id === rerender.dataset.rerenderExplainer));
+  if (event.target.closest('[data-open-brand]')) openBrandDialog().catch(error => notice(error.message));
+});
 $('#fullscreenStage').addEventListener('click',()=>$('#stage').requestFullscreen());
 $$('.side-tab').forEach(b=>b.addEventListener('click',()=>{$$('.side-tab').forEach(x=>x.classList.toggle('active',x===b));$('#transcriptPane').classList.toggle('hidden',b.dataset.side!=='transcript');$('#activityPane').classList.toggle('hidden',b.dataset.side!=='activity')}));
 $('#startEpisode').addEventListener('click',async()=>{const button=$('#startEpisode');try{const audioUnlock=unlockAudio();for(const p of [episodePerson(state.current,'host'),episodePerson(state.current,'guest')]){if(!state.config.providers.ready.models[p.modelProvider||'gateway']||!state.config.providers.ready.speech[p.speechProvider||'gateway'])throw new Error(`Configure ${p.name}'s model and speech providers before starting.`)}const credentials=await credentialsForCurrentEpisode();if(state.current.settings.demo?.authRequired&&!credentials)return;button.disabled=true;button.textContent=credentials?'Signing in securely…':'Preparing…';if(credentials&&!credentials.manualPrepared){await api(`/api/episodes/${state.current.id}/prepare`,{method:'POST',body:JSON.stringify({credentials})});state.credentials.delete(state.current.id)}await audioUnlock;await startRecording();button.classList.add('hidden');await api(`/api/episodes/${state.current.id}/start`,{method:'POST'});setStatus('preparing');await refreshMe()}catch(error){notice(error.message);if(state.recorder?.state==='recording')state.recorder.stop()}finally{button.disabled=false;button.textContent='Start recording'}});

@@ -1,7 +1,10 @@
-import { explainer, setExplainerFields, putNamedAsset, refundCredits, stamp } from '../lib/store.mjs';
+import { explainer, setExplainerFields, putNamedAsset, readAssetBytes, refundCredits, stamp } from '../lib/store.mjs';
 import { modelProviders, speechProviders, supportedVoice } from '../lib/providers.mjs';
 import { VercelEpisodeSandbox } from '../lib/vercel-sandbox.mjs';
 import { inspectSandboxMedia, evaluateMediaQuality } from '../lib/media-quality.mjs';
+import { focusFilters } from '../lib/explainer-effects.mjs';
+import { ffmetadata, normalizeChapters, titleFromText } from '../lib/chapters.mjs';
+import { generatedMusicSource, titleMusicFilter } from '../lib/podcast-media.mjs';
 
 const safeName = value => String(value).replace(/[^a-zA-Z0-9._-]/g, '_');
 const srtText = text => String(text).replace(/\r?\n/g, ' ').replace(/<[^>]+>/g, '');
@@ -55,7 +58,7 @@ export function captionChunks(text, maxWords = 7, maxCharacters = 52) {
 }
 
 export function buildCaptions(timeline, options = {}) {
-  let cursor = 0;
+  let cursor = Math.max(0, Number(options.offset) || 0);
   let cue = 1;
   const entries = [];
   for (const part of timeline) {
@@ -174,7 +177,9 @@ export async function normalizeSceneVideo(browser, inputPath, outputPath, durati
   const sourceProbe = await browser.run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', inputPath]);
   const sourceDuration = Number((await sourceProbe.stdout()).trim()) || Number(length);
   const playbackRatio = Math.max(.2, Math.min(4, Number(length) / sourceDuration));
-  const videoFilter = `setpts=${playbackRatio.toFixed(6)}*PTS,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,fps=30`;
+  // Zoom and highlight run on source timestamps, before the scene is retimed to the narration.
+  const emphasis = options.focus ? ['scale=1920:1080', ...focusFilters(options.focus, options.clickAt, options.effects || {})] : [];
+  const videoFilter = [...emphasis, `setpts=${playbackRatio.toFixed(6)}*PTS`, 'scale=1920:1080:force_original_aspect_ratio=decrease', 'pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black', 'fps=30'].join(',');
   let result = await browser.run('ffmpeg', ['-y', '-fflags', '+genpts', '-i', inputPath, '-t', length, '-an', '-vf', videoFilter, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', outputPath], 10 * 60 * 1000);
   if (result.exitCode) throw new Error(`The live browser recording is invalid and cannot be used: ${(await result.stderr()).slice(-1200)}`);
   const metrics = await inspectSandboxMedia(browser, outputPath, { sceneThreshold: 0.008, ignoreCaptionBand: false });
@@ -189,15 +194,20 @@ export async function beginExplainer(id) {
   const browser = new VercelEpisodeSandbox(id, () => {});
   await browser.setViewport(1920, 1080);
   if (!item.authRequired) await browser.command(['open', item.url]);
+  await browser.dismissOverlays();
   return browser.capture(null, item.url);
+}
+
+export function sceneBudgetFor(item) {
+  if (item?.plan?.approved && item.plan.scenes?.length) return Math.max(1, Math.min(20, item.plan.scenes.length));
+  const words = String(item?.brief || '').trim().split(/\s+/).filter(Boolean).length;
+  const explicitSteps = (String(item?.brief || '').match(/(?:^|\n)\s*(?:\d+[.)]|[-*])\s+/g) || []).length;
+  return Math.max(4, Math.min(20, explicitSteps ? explicitSteps + 3 : Math.ceil(words / 14) + 4));
 }
 
 export async function explainerSceneBudget(id) {
   'use step';
-  const item = await explainer(id);
-  const words = String(item.brief || '').trim().split(/\s+/).filter(Boolean).length;
-  const explicitSteps = (String(item.brief || '').match(/(?:^|\n)\s*(?:\d+[.)]|[-*])\s+/g) || []).length;
-  return Math.max(4, Math.min(20, explicitSteps ? explicitSteps + 3 : Math.ceil(words / 14) + 4));
+  return sceneBudgetFor(await explainer(id));
 }
 
 export function requiredActionKinds(brief = '') {
@@ -223,7 +233,7 @@ export function buildExplainerDirectorState(requiredKinds, timeline, history, sc
     previousActions: history.filter(entry => entry.action).map(entry => ({ action: entry.action, narration: entry.narration, screenChanged: entry.screenChanged })),
     rejectedDecisions: history.filter(entry => entry.rejected).slice(-6).map(entry => entry.rejected),
     currentScreen: { title: screen.title, accessibility: screen.content },
-    scene: { number: index + 1, estimatedBudget: sceneBudget, estimatedBudgetReached: index >= sceneBudget - 1 },
+    scene: { number: index + 1, completedScenes: timeline.length, estimatedBudget: sceneBudget, estimatedBudgetReached: index >= sceneBudget - 1 },
     allowedActions: process.env.COMPUTER_USE_SNAPSHOT_ID
       ? ['click','double_click','right_click','type','key','scroll','drag','visit','wait']
       : ['click','type','select','press','scroll','visit','wait'],
@@ -246,12 +256,18 @@ export async function planScene(id, directorState) {
   const system = computerUse
     ? `You direct a continuous product walkthrough by looking at a 1920x1080 screenshot and operating the visible desktop like a careful human. Return one JSON object with narration, action, and done. Actions: {"type":"click","selector":"@e2","x":500,"y":300}, {"type":"double_click","selector":"@e2","x":500,"y":300}, {"type":"right_click","selector":"@e2","x":500,"y":300}, {"type":"type","selector":"@e4","x":500,"y":300,"text":"visible demo value"}, {"type":"key","key":"Return"}, {"type":"scroll","direction":"down","amount":5}, {"type":"drag","x":400,"y":300,"endX":800,"endY":300}, {"type":"visit","url":"https://..."}, or {"type":"wait","ms":800}. Coordinates refer to the supplied screenshot. When the accessibility snapshot contains the intended web control, include its exact @e ref as selector (never a CSS, XPath, or text selector) and also provide the visible approximate coordinates. Use coordinates alone for canvas, remote desktop, or other targets without a ref. The screenshot is primary visual context; the ref anchors small targets reliably. Use an ordinary left click for web links, buttons, and controls. Use double click, right click, or drag only when the requested workflow explicitly requires that gesture. Every scene must advance the requested workflow or reveal a new part of the interface. Never repeat an action, screen, named section, typed field, or narration. After one scroll, interact with a newly visible control or finish. Prefer one safe reversible visible interaction in each scene. Keep narration between 12 and 28 words and introduce the action that happens during the sentence. Never delete, purchase, publish, send messages, change account settings, log out, or submit irreversible forms. Set done true as soon as the requested coverage is complete. Do not mention automation, coordinates, credentials, or that you are an AI.`
     : `You direct a continuous, human-operated premium product walkthrough. Return one JSON object with narration, action, and done. The action is one of: {"type":"click","selector":"@e1"}, {"type":"type","selector":"@e1","value":"visible demo value"}, {"type":"select","selector":"@e1","value":"option value"}, {"type":"press","selector":"@e1","key":"ArrowRight"}, {"type":"scroll","direction":"down","amount":900}, {"type":"visit","url":"https://..."}, or {"type":"wait","ms":800}. Use only element refs visible in the current accessibility snapshot, written exactly as @eN; never use CSS, XPath, or text selectors. Click only refs labeled link, button, checkbox, radio, tab, menuitem, or option. Type only into refs labeled textbox, searchbox, input, textarea, or combobox. Every scene must advance the requested workflow or reveal a new part of the interface. Never repeat any prior action, screen, named section, typed field, or narration. One scroll scene is enough to reveal a section; after scrolling, interact with a new visible control or set done true. Prefer one visible, reversible interaction in every scene; use wait only for the opening or final wrap-up. Use type rather than fill so real keystrokes appear in the recording. Keep narration between 12 and 28 words and time it as a human explanation of the action occurring now. Describe only what is visible or what this scene's action will visibly demonstrate. Stay read-only unless the user's brief explicitly requires a safe reversible submission: never delete, submit payments, change account settings, log out, send messages, or publish content. Set done true immediately after the requested workflow has been covered. Do not mention automation, selectors, credentials, or that you are an AI.`;
-  const context = `Application: ${item.url}\nRequested coverage: ${item.brief}\nDirector state:\n${JSON.stringify(directorState)}\nChoose the next action from allowedActions. Use remainingMilestones to decide what the walkthrough still needs. Prioritize the first remaining milestone before optional exploration whenever the current screen can perform it. A milestone counts only after a recorded action visibly completes it.${directorState.scene.estimatedBudgetReached && directorState.remainingMilestones.length ? ` The next action must satisfy one of these remaining milestones: ${directorState.remainingMilestones.join(', ')}.` : ''} Set done true only when remainingMilestones is empty and this scene completes the requested coverage.`;
+  const planned = item.plan?.approved ? item.plan.scenes || [] : [];
+  const current = planned[directorState.scene.completedScenes];
+  const planGuidance = planned.length ? `\nApproved scene plan (follow it in order):\n${planned.map((scene, i) => `${i + 1}. ${scene.title} — goal: ${scene.goal} — narration: ${scene.narration}`).join('\n')}\n${current ? `You are on planned scene ${directorState.scene.completedScenes + 1}: "${current.title}". Achieve its goal with one visible action and use its narration nearly word for word, adjusting only what the screen makes untrue.` : 'Every planned scene is recorded; set done true with a short closing line.'}` : '';
+  const context = `Application: ${item.url}\nRequested coverage: ${item.brief}${planGuidance}\nDirector state:\n${JSON.stringify(directorState)}\nChoose the next action from allowedActions. Use remainingMilestones to decide what the walkthrough still needs. Prioritize the first remaining milestone before optional exploration whenever the current screen can perform it. A milestone counts only after a recorded action visibly completes it.${directorState.scene.estimatedBudgetReached && directorState.remainingMilestones.length ? ` The next action must satisfy one of these remaining milestones: ${directorState.remainingMilestones.join(', ')}.` : ''} Set done true only when remainingMilestones is empty and this scene completes the requested coverage.`;
   const model = process.env.EXPLAINER_MODEL || 'google/gemini-3.1-flash-lite';
   const routing = { user: item.ownerId, tags: ['feature:explainer-director', `mode:${computerUse ? 'computer-use' : 'browser'}`] };
-  if (!computerUse) return provider.generate([{ role: 'system', content: system }, { role: 'user', content: context }], model, routing);
-  const capture = await new VercelEpisodeSandbox(id, () => {}).captureForModel(item.url);
-  return provider.generateVisual([{ role: 'system', content: system }, { role: 'user', content: `${context}\nThe attached image is the current live desktop screenshot.` }], capture.image, model, routing);
+  const sandbox = new VercelEpisodeSandbox(id, () => {});
+  await sandbox.dismissOverlays();
+  const withTitle = decision => (current && decision && typeof decision === 'object' ? { ...decision, title: current.title } : decision);
+  if (!computerUse) return withTitle(await provider.generate([{ role: 'system', content: system }, { role: 'user', content: context }], model, routing));
+  const capture = await sandbox.captureForModel(item.url);
+  return withTitle(await provider.generateVisual([{ role: 'system', content: system }, { role: 'user', content: `${context}\nThe attached image is the current live desktop screenshot.` }], capture.image, model, routing));
 }
 
 export async function renderScene(id, index, narration, action) {
@@ -272,11 +288,13 @@ export async function renderScene(id, index, narration, action) {
   const probe = await browser.run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audioPath]);
   const speechDuration = Math.max(2, Math.min(40, Number((await probe.stdout()).trim()) || 8));
   const recordingStarted = Date.now();
+  let performed = null, clickAt = 0;
   await browser.startVideo(rawVideoPath);
   try {
     await browser.command(['wait', '450']);
-    if (browser.computerUseEnabled()) await browser.performComputerAction(action);
-    else await browser.performBrowserAction(action);
+    performed = browser.computerUseEnabled() ? await browser.performComputerAction(action) : await browser.performBrowserAction(action);
+    // The click lands just before the executor's short post-action pause.
+    clickAt = Math.max(0.3, (Date.now() - recordingStarted) / 1000 - 0.6);
     const remaining = speechDuration * 1000 - (Date.now() - recordingStarted);
     if (remaining > 0) await browser.command(['wait', String(Math.ceil(Math.max(500, remaining)))]);
   } finally {
@@ -284,30 +302,77 @@ export async function renderScene(id, index, narration, action) {
   }
   const screen = await browser.capture(null, item.url);
   const duration = speechDuration;
-  const normalized = await normalizeSceneVideo(browser, rawVideoPath, videoPath, duration, { requireMotion: action.type !== 'wait' });
+  const effects = { zoom: item.effects?.zoom !== false, highlight: item.effects?.highlight !== false };
+  const focus = (effects.zoom || effects.highlight) && ['click','double_click','right_click','type','fill','select','press'].includes(action.type) ? performed?.focus : null;
+  const normalized = await normalizeSceneVideo(browser, rawVideoPath, videoPath, duration, { requireMotion: action.type !== 'wait', focus, clickAt, effects });
+  // Keep each finished scene so narration, voice, and captions can be re-rendered without re-recording.
+  const sceneAsset = await putNamedAsset(`explainer-${safeName(id)}-scene-${index}.mp4`, await browser.readSandboxFile(videoPath));
   const paddedAudioPath = `/tmp/explainer-${index}.m4a`;
   const padded = await browser.run('ffmpeg', ['-y', '-i', audioPath, '-af', 'apad', '-t', String(duration), '-c:a', 'aac', '-b:a', '192k', paddedAudioPath], 5 * 60 * 1000);
   if (padded.exitCode) throw new Error(`Could not align narration with the recorded action: ${(await padded.stderr()).slice(-1000)}`);
-  return { duration, captionDuration: speechDuration, video: normalized.path, audio: paddedAudioPath, screen, action, usedScreenshotFallback: normalized.usedScreenshotFallback, metrics: normalized.metrics };
+  return { duration, captionDuration: speechDuration, video: normalized.path, audio: paddedAudioPath, screen, action, usedScreenshotFallback: normalized.usedScreenshotFallback, metrics: normalized.metrics, sceneAsset };
 }
 
-export async function finishExplainer(id, timeline) {
-  'use step';
-  const item = await explainer(id);
+// Brand title card for the start or end of an explainer: a still frame with a short music sting.
+async function explainerCard(browser, item, kind, seconds) {
+  const brand = item.brand || {};
+  const logo = brand.logo ? await readAssetBytes(brand.logo).catch(() => null) : null;
+  const logoData = logo?.length ? `data:image/${/\.svg$/i.test(brand.logo) ? 'svg+xml' : /\.jpe?g$/i.test(brand.logo) ? 'jpeg' : /\.webp$/i.test(brand.logo) ? 'webp' : 'png'};base64,${logo.toString('base64')}` : '';
+  const primary = validHex(brand.primaryColor, '#101c24'), accent = validHex(brand.accentColor, '#80ded1');
+  const escape = value => String(value || '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+  const heading = kind === 'intro' ? escape(item.title) : escape(brand.outroText || 'Thanks for watching');
+  const line = kind === 'intro' ? escape(brand.name || '') : escape(brand.callToAction || '');
+  const markup = `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:1920px;height:1080px;background:${primary};color:#fff;font-family:Arial,sans-serif;display:grid;place-items:center;text-align:center}img{max-height:150px;max-width:520px;margin-bottom:48px}h1{font-size:84px;margin:0 160px 28px;line-height:1.05}p{font-size:34px;color:${accent};margin:0;letter-spacing:2px}</style><div>${logoData ? `<img src="${logoData}">` : ''}<h1>${heading}</h1><p>${line}</p></div>`;
+  const htmlPath = `/tmp/explainer-${kind}.html`, pngPath = `/tmp/explainer-${kind}.png`;
+  await browser.writeSandboxFile(htmlPath, markup);
+  await browser.command(['open', `file://${htmlPath}`]);
+  await browser.command(['wait', '250']);
+  await browser.command(['screenshot', pngPath]);
+  const videoPath = `/tmp/explainer-${kind}.mp4`, audioPath = `/tmp/explainer-${kind}.m4a`;
+  let result = await browser.run('ffmpeg', ['-y', '-loop', '1', '-framerate', '30', '-i', pngPath, '-t', seconds.toFixed(2), '-vf', `scale=1920:1080,fps=30,format=yuv420p,fade=t=in:d=0.4,fade=t=out:st=${(seconds - 0.5).toFixed(2)}:d=0.5`, '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', videoPath], 5 * 60 * 1000);
+  if (result.exitCode) throw new Error(`Could not render the ${kind} card: ${(await result.stderr()).slice(-800)}`);
+  result = await browser.run('ffmpeg', ['-y', '-f', 'lavfi', '-i', generatedMusicSource(seconds), '-af', titleMusicFilter(seconds), '-c:a', 'aac', '-b:a', '192k', audioPath], 5 * 60 * 1000);
+  if (result.exitCode) throw new Error(`Could not render the ${kind} sound: ${(await result.stderr()).slice(-800)}`);
+  return { video: videoPath, audio: audioPath, duration: seconds };
+}
+
+async function explainerSummary(item, timeline) {
+  const provider = modelProviders.get('gateway');
+  if (!provider?.ready?.()) return null;
+  try {
+    const result = await provider.generate([
+      { role: 'system', content: 'You write metadata for a product walkthrough video. Return JSON {"summary":string,"chapterTitles":[string]}. summary: two or three plain sentences describing what the viewer learns. chapterTitles: one short title (2-5 words, no numbering) per scene, in order.' },
+      { role: 'user', content: `Video: ${item.title}\nApplication: ${item.url}\nScenes:\n${timeline.map((part, i) => `${i + 1}. ${part.text}`).join('\n')}` }
+    ], process.env.AI_GATEWAY_MODEL, { user: item.ownerId, tags: ['feature:explainer-metadata'] });
+    return { summary: String(result?.summary || '').trim().slice(0, 1200), chapterTitles: Array.isArray(result?.chapterTitles) ? result.chapterTitles.map(String) : [] };
+  } catch { return null; }
+}
+
+// Shared by the first render and by re-renders: cards, captions, chapters, mix, quality check, upload.
+async function mixExplainer(browser, id, item, timeline) {
   await setExplainerFields(id, { progress: 'Mixing narration, picture, and subtitles' });
-  const browser = new VercelEpisodeSandbox(id, () => {});
-  const videoList = timeline.map(part => `file '${part.video}'`).join('\n');
-  const audioList = timeline.map(part => `file '${part.audio}'`).join('\n');
-  const captionOptions = { style: item.captionStyle || 'studio', ...(item.captionOptions || {}) };
+  const branding = item.branding || {};
+  const intro = branding.intro && item.brand ? await explainerCard(browser, item, 'intro', 3.5) : null;
+  const outro = branding.outro && item.brand ? await explainerCard(browser, item, 'outro', 4) : null;
+  const pieces = [...(intro ? [intro] : []), ...timeline, ...(outro ? [outro] : [])];
+  const captionOptions = { style: item.captionStyle || 'studio', ...(item.captionOptions || {}), offset: intro?.duration || 0 };
   const captions = buildCaptions(timeline, captionOptions);
-  await browser.writeSandboxFile('/tmp/videos.txt', videoList);
-  await browser.writeSandboxFile('/tmp/audio.txt', audioList);
+  const metadata = await explainerSummary(item, timeline);
+  let cursor = intro?.duration || 0;
+  const rawChapters = [];
+  if (intro) rawChapters.push({ start: 0, title: 'Introduction' });
+  timeline.forEach((part, index) => { rawChapters.push({ start: cursor, title: part.title || metadata?.chapterTitles?.[index] || titleFromText(part.text) }); cursor += part.duration; });
+  const totalDuration = pieces.reduce((sum, part) => sum + part.duration, 0);
+  const chapters = normalizeChapters(rawChapters, totalDuration);
+  await browser.writeSandboxFile('/tmp/videos.txt', pieces.map(part => `file '${part.video}'`).join('\n'));
+  await browser.writeSandboxFile('/tmp/audio.txt', pieces.map(part => `file '${part.audio}'`).join('\n'));
   await browser.writeSandboxFile('/tmp/captions.srt', captions);
+  await browser.writeSandboxFile('/tmp/chapters.txt', ffmetadata(chapters, totalDuration, { title: item.title, comment: metadata?.summary }));
   let result = await browser.run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', '/tmp/videos.txt', '-an', '-vf', 'fps=30,format=yuv420p', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '/tmp/picture.mp4'], 10 * 60 * 1000);
   if (result.exitCode) throw new Error(`Could not assemble browser recording: ${(await result.stderr()).slice(-1200)}`);
   result = await browser.run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', '/tmp/audio.txt', '-c:a', 'aac', '-b:a', '192k', '/tmp/narration.m4a'], 10 * 60 * 1000);
   if (result.exitCode) throw new Error(`Could not assemble narration: ${(await result.stderr()).slice(-1200)}`);
-  const finalArgs = ['-y', '-i', '/tmp/picture.mp4', '-i', '/tmp/narration.m4a', ...(captionOptions.enabled === false ? [] : ['-vf', explainerCaptionFilter(captionOptions)]), '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-shortest', '/tmp/final.mp4'];
+  const finalArgs = ['-y', '-i', '/tmp/picture.mp4', '-i', '/tmp/narration.m4a', '-i', '/tmp/chapters.txt', '-map', '0:v', '-map', '1:a', '-map_metadata', '2', '-map_chapters', '2', ...(captionOptions.enabled === false ? [] : ['-vf', explainerCaptionFilter(captionOptions)]), '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-movflags', '+faststart', '-shortest', '/tmp/final.mp4'];
   result = await browser.run('ffmpeg', finalArgs, 15 * 60 * 1000);
   if (result.exitCode) throw new Error(`Could not render the final video: ${(await result.stderr()).slice(-1200)}`);
   const quality = await inspectSandboxMedia(browser, '/tmp/final.mp4', { sceneThreshold: 0.008 });
@@ -317,10 +382,106 @@ export async function finishExplainer(id, timeline) {
   const verdict = evaluateMediaQuality(quality, { interactive: interactiveActions.length > 0, minDuration: Math.max(4, timeline.length * 1.5), maxSilencePercent: 35, maxSilenceSeconds: 2 });
   if (!verdict.passed) throw new Error(`Explainer quality check failed: ${verdict.failures.join(' ')}`);
   const [video, srt] = await Promise.all([browser.readSandboxFile('/tmp/final.mp4'), browser.readSandboxFile('/tmp/captions.srt')]);
-  const stem = `explainer-${safeName(id)}`;
+  const stem = `explainer-${safeName(id)}${item.renderVersion ? `-v${item.renderVersion}` : ''}`;
   const [videoUrl, captionsUrl] = await Promise.all([putNamedAsset(`${stem}.mp4`, video), putNamedAsset(`${stem}.srt`, srt)]);
-  await setExplainerFields(id, { status: 'complete', progress: 'Complete', endedAt: stamp(), video: videoUrl, captions: captionsUrl, transcript: timeline.map(part => part.text), actions: timeline.map(part => part.action), quality });
+  return {
+    video: videoUrl, captions: captionsUrl, quality, chapters, summary: metadata?.summary || '',
+    transcript: timeline.map(part => part.text), actions: timeline.map(part => part.action),
+    scenes: timeline.map((part, index) => ({ text: part.text, title: rawChapters[index + (intro ? 1 : 0)]?.title || '', video: part.sceneAsset, duration: part.duration, captionDuration: part.captionDuration, action: part.action, screenChanged: part.screenChanged, metrics: part.metrics })).filter(scene => scene.video)
+  };
+}
+
+export async function finishExplainer(id, timeline) {
+  'use step';
+  const item = await explainer(id);
+  const browser = new VercelEpisodeSandbox(id, () => {});
+  const output = await mixExplainer(browser, id, item, timeline);
+  await setExplainerFields(id, { status: 'complete', progress: 'Complete', endedAt: stamp(), ...output });
   await browser.close().catch(() => {});
+}
+
+// Re-voices and re-captions the saved scene clips: each clip is retimed to its new narration.
+export async function rerenderExplainer(id) {
+  'use step';
+  const item = await explainer(id);
+  if (!item?.scenes?.length) throw new Error('This explainer has no saved scenes to re-render. Restart it instead.');
+  await setExplainerFields(id, { progress: 'Re-voicing narration' });
+  const browser = new VercelEpisodeSandbox(`rerender-${id}`, () => {});
+  try {
+    const speechProvider = item.speechProvider || 'gateway';
+    const speech = speechProviders.get(speechProvider);
+    if (!speech) throw new Error('The narration voice provider is unavailable.');
+    const timeline = [];
+    for (const [index, scene] of item.scenes.entries()) {
+      const generated = await speech.synthesize(scene.text, supportedVoice(speechProvider, item.voice, 'coral'), { style: 'clear, friendly product walkthrough narrator' });
+      const chunks = [];
+      for await (const chunk of Buffer.isBuffer(generated) || generated instanceof Uint8Array ? [generated] : generated) chunks.push(Buffer.from(chunk));
+      const audioPath = `/tmp/rerender-${index}.mp3`, sourcePath = `/tmp/rerender-source-${index}.mp4`, videoPath = `/tmp/rerender-${index}.mp4`, paddedPath = `/tmp/rerender-${index}.m4a`;
+      await browser.writeSandboxFile(audioPath, Buffer.concat(chunks));
+      await browser.writeSandboxFile(sourcePath, await readAssetBytes(scene.video));
+      const probe = await browser.run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audioPath]);
+      const speechDuration = Math.max(2, Math.min(40, Number((await probe.stdout()).trim()) || 8));
+      const ratio = Math.max(0.6, Math.min(1.6, speechDuration / Math.max(0.5, Number(scene.duration) || speechDuration)));
+      let result = await browser.run('ffmpeg', ['-y', '-i', sourcePath, '-vf', `setpts=${ratio.toFixed(6)}*PTS,tpad=stop_mode=clone:stop_duration=40,fps=30,format=yuv420p`, '-t', speechDuration.toFixed(3), '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', videoPath], 10 * 60 * 1000);
+      if (result.exitCode) throw new Error(`Could not retime scene ${index + 1}: ${(await result.stderr()).slice(-800)}`);
+      result = await browser.run('ffmpeg', ['-y', '-i', audioPath, '-af', 'apad', '-t', speechDuration.toFixed(3), '-c:a', 'aac', '-b:a', '192k', paddedPath], 5 * 60 * 1000);
+      if (result.exitCode) throw new Error(`Could not align narration ${index + 1}: ${(await result.stderr()).slice(-800)}`);
+      timeline.push({ ...scene, duration: speechDuration, captionDuration: speechDuration, video: videoPath, audio: paddedPath, sceneAsset: scene.video });
+    }
+    const renderVersion = (Number(item.renderVersion) || 0) + 1;
+    const output = await mixExplainer(browser, id, { ...item, renderVersion }, timeline);
+    await setExplainerFields(id, { status: 'complete', progress: 'Complete', renderVersion, renderedAt: stamp(), rerenderError: null, ...output });
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+// A failed re-render keeps the previous video and refunds the re-render charge.
+export async function failExplainerRerender(id, message) {
+  'use step';
+  const item = await explainer(id);
+  if (item?.rerenderCredits && item.ownerId) await refundCredits(item.ownerId, item.rerenderCredits, 'explainer', item.rerenderReference || `${id}:rerender`);
+  await setExplainerFields(id, { status: 'complete', progress: 'Complete', rerenderCredits: 0, rerenderError: String(message || 'Re-render failed.').slice(0, 2000) });
+}
+
+// Drafts a scene-by-scene plan the user can edit and approve before any recording is paid for.
+export async function draftExplainerPlan(id) {
+  'use step';
+  const item = await explainer(id);
+  await setExplainerFields(id, { status: 'planning', progress: 'Drafting the scene plan', error: null });
+  const browser = new VercelEpisodeSandbox(id, () => {});
+  await browser.setViewport(1920, 1080);
+  if (!item.authRequired) await browser.command(['open', item.url]);
+  await browser.dismissOverlays();
+  const capture = await browser.captureForModel(item.url);
+  const budget = sceneBudgetFor(item);
+  const provider = modelProviders.get('gateway');
+  const messages = [
+    { role: 'system', content: `You plan a narrated product walkthrough video before it is recorded. Return JSON {"scenes":[{"title":string,"goal":string,"narration":string}]}. Plan ${Math.max(2, budget - 2)} to ${budget} scenes that cover the requested workflow in order, each achievable with ONE visible, safe, reversible action (click, type a demo value, scroll, or open a page). title: 2-5 words. goal: the one action and what it reveals. narration: 12-28 words spoken while it happens, describing only what will be visible. Never plan deleting, paying, publishing, sending messages, changing account settings, or logging out.` },
+    { role: 'user', content: `Application: ${item.url}\nRequested coverage: ${item.brief}\nCurrent page: ${capture.screen.title}\nAccessibility snapshot (truncated):\n${String(capture.screen.content || '').slice(0, 5000)}` }
+  ];
+  const routing = { user: item.ownerId, tags: ['feature:explainer-plan'] };
+  const result = process.env.COMPUTER_USE_SNAPSHOT_ID && provider.generateVisual
+    ? await provider.generateVisual(messages, capture.image, process.env.EXPLAINER_MODEL || 'google/gemini-3.1-flash-lite', { ...routing, output: 'json' })
+    : await provider.generate(messages, process.env.EXPLAINER_MODEL || process.env.AI_GATEWAY_MODEL, routing);
+  const scenes = normalizePlan(result, budget);
+  if (!scenes.length) throw new Error('The planner returned no usable scenes. Make the workflow brief more specific.');
+  await setExplainerFields(id, { status: 'awaiting_approval', progress: 'Scene plan ready for review', plan: { scenes, approved: false, createdAt: stamp() } });
+  return scenes;
+}
+
+export function normalizePlan(result, budget = 20) {
+  const scenes = Array.isArray(result?.scenes) ? result.scenes : Array.isArray(result) ? result : [];
+  return scenes.map(scene => ({
+    title: String(scene?.title || '').replace(/\s+/g, ' ').trim().slice(0, 60),
+    goal: String(scene?.goal || '').replace(/\s+/g, ' ').trim().slice(0, 240),
+    narration: String(scene?.narration || '').replace(/\s+/g, ' ').trim().slice(0, 360)
+  })).filter(scene => scene.narration && (scene.goal || scene.title)).slice(0, Math.max(1, Math.min(20, Number(budget) || 20)));
+}
+
+export async function failExplainerPlan(id, message) {
+  'use step';
+  await setExplainerFields(id, { status: 'draft', progress: 'Plan could not be drafted', error: String(message || 'Planning failed.').slice(0, 2000) });
 }
 
 export async function failExplainer(id, message) {

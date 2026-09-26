@@ -1,4 +1,4 @@
-import { beginExplainer, explainerSceneBudget, explainerRequirements, planScene, renderScene, finishExplainer, failExplainer, actionFingerprint, actionIsCompatible, resolveActionTarget, compatibleTargets, explainerActionKind, buildExplainerDirectorState } from './explainer-steps.mjs';
+import { beginExplainer, explainerSceneBudget, explainerRequirements, planScene, renderScene, finishExplainer, failExplainer, draftExplainerPlan, failExplainerPlan, rerenderExplainer, failExplainerRerender, actionFingerprint, actionIsCompatible, resolveActionTarget, compatibleTargets, explainerActionKind, buildExplainerDirectorState } from './explainer-steps.mjs';
 
 export async function explainerWorkflow(explainerId) {
   'use workflow';
@@ -53,7 +53,7 @@ export async function explainerWorkflow(explainerId) {
         continue;
       }
       completedActions.push(fingerprint);
-      timeline.push({ text: narration, duration: result.duration, captionDuration: result.captionDuration, video: result.video, audio: result.audio, action, screenChanged, metrics: result.metrics, usedScreenshotFallback: result.usedScreenshotFallback });
+      timeline.push({ text: narration, title: String(decision.title || '').slice(0, 60), duration: result.duration, captionDuration: result.captionDuration, video: result.video, audio: result.audio, sceneAsset: result.sceneAsset, action, screenChanged, metrics: result.metrics, usedScreenshotFallback: result.usedScreenshotFallback });
       done = decision.done === true;
       if (done) {
         const kinds = new Set(timeline.map(part => explainerActionKind(part.action)));
@@ -77,4 +77,16 @@ export async function explainerWorkflow(explainerId) {
   } catch (error) {
     await failExplainer(explainerId, error.message || 'Explainer generation failed.');
   }
+}
+
+export async function explainerPlanWorkflow(explainerId) {
+  'use workflow';
+  try { await draftExplainerPlan(explainerId); }
+  catch (error) { await failExplainerPlan(explainerId, error.message || 'Planning failed.'); }
+}
+
+export async function explainerRerenderWorkflow(explainerId) {
+  'use workflow';
+  try { await rerenderExplainer(explainerId); }
+  catch (error) { await failExplainerRerender(explainerId, error.message || 'Re-render failed.'); }
 }
