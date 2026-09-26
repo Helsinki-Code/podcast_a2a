@@ -150,7 +150,18 @@ export async function handle({ req, res, url, parts, auth, userAccount }) {
     }
     if (parts[3] === 'start' && req.method === 'POST') {
       if (item.status !== 'draft') return error(res, 409, 'Episode has already started.');
-      if (item.settings.demo?.authRequired && !item.demoPrepared) return error(res, 409, 'Prepare the authenticated browser before recording.');
+      if (item.settings.demo?.authRequired && !item.demoPrepared) {
+        // Preparation and start normally arrive as consecutive requests. On separate serverless
+        // invocations a read can briefly miss that write, so accept the same ephemeral credentials
+        // here and make readiness part of the start transaction. Credentials are never persisted.
+        const input = await body(req, 12000);
+        const credentials = { username: String(input.credentials?.username || '').slice(0, 500), password: String(input.credentials?.password || '').slice(0, 2000) };
+        if (!credentials.username || !credentials.password) return error(res, 409, 'Sign in to the demo browser, then start recording.');
+        const { VercelEpisodeSandbox } = await import('../lib/vercel-sandbox.mjs');
+        await new VercelEpisodeSandbox(item.id, () => {}).login(item.settings.demo, credentials);
+        await setEpisodeFields(item.id, { demoPrepared: true });
+        item.demoPrepared = true;
+      }
       if (!await reserveCredits(auth.userId, costs.podcast, 'podcast', item.id)) return error(res, 402, `This podcast needs ${costs.podcast} credits.`);
       await setEpisodeFields(item.id, { status: 'preparing', stopRequested: false, creditsCharged: costs.podcast, creditReference: item.id, attempt: 1 });
       return launchEpisode(res, item);

@@ -181,6 +181,7 @@ async function pollPodcastVideo(id) {
 
 function credentialsForCurrentEpisode() {
   if (!state.current?.settings?.demo?.authRequired) return Promise.resolve(null);
+  if (state.current.demoPrepared) return Promise.resolve(null);
   const cached = state.credentials.get(state.current.id);
   if (cached) return Promise.resolve(cached);
   const dialog = $('#credentialsDialog'), form = $('#credentialsForm');
@@ -194,7 +195,12 @@ function credentialsForCurrentEpisode() {
       catch (error) { popup?.close(); notice(error.message); }
     };
     const desktopReady = async () => busy($('#episodeDesktopReady'), async () => {
-      try { await api(`/api/episodes/${state.current.id}/desktop-ready`, { method: 'POST' }); value = { manualPrepared: true }; dialog.close(); }
+      try {
+        await api(`/api/episodes/${state.current.id}/desktop-ready`, { method: 'POST' });
+        state.current.demoPrepared = true;
+        value = { manualPrepared: true };
+        dialog.close();
+      }
       catch (error) { notice(error.message); }
     });
     const close = () => { form.removeEventListener('submit', submit); $('#openEpisodeDesktop').removeEventListener('click', openDesktop); $('#episodeDesktopReady').removeEventListener('click', desktopReady); dialog.removeEventListener('close', close); resolve(value); };
@@ -454,9 +460,15 @@ export function initStudio() {
       const credentials = await credentialsForCurrentEpisode();
       if (state.current.settings.demo?.authRequired && !credentials) return;
       await busy(button, async () => {
-        if (credentials && !credentials.manualPrepared) { await api(`/api/episodes/${state.current.id}/prepare`, { method: 'POST', body: JSON.stringify({ credentials }) }); state.credentials.delete(state.current.id); }
+        if (credentials && !credentials.manualPrepared) {
+          await api(`/api/episodes/${state.current.id}/prepare`, { method: 'POST', body: JSON.stringify({ credentials }) });
+          state.current.demoPrepared = true;
+        }
         await audioUnlock; await startRecording();
-        await api(`/api/episodes/${state.current.id}/start`, { method: 'POST' });
+        // Keep the credentials until start succeeds. The start route can use them as an atomic
+        // fallback if a separate serverless invocation has not observed the preparation write yet.
+        await api(`/api/episodes/${state.current.id}/start`, { method: 'POST', body: JSON.stringify(credentials && !credentials.manualPrepared ? { credentials } : {}) });
+        state.credentials.delete(state.current.id);
         state.current.status = 'preparing'; refreshStudio(); await refreshMe();
         if (state.current.settings.playbackMode === 'background') notice('Recording in the background. You can close this tab; we will email you when it is ready if notifications are on.', true);
         if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
